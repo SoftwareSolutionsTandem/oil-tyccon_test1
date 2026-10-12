@@ -1,9 +1,8 @@
 import { MARKET, OFFLINE_CAP } from './config';
-import { advanceStats, buildingUpkeep, pumpRate, recordStat, storageCapacity, terminalThroughput } from './economy';
+import { advanceStats, buildingUpkeep, drainageTiles, pumpRate, recordStat, storageCapacity, terminalThroughput } from './economy';
 import { checkObjectives, type Objective } from './objectives';
 import { Rng } from './rng';
 import type { GameState, Totals } from './types';
-import { tileIndex } from './world';
 
 export interface TickEvents {
   autoSold: number;
@@ -17,12 +16,14 @@ export function tick(s: GameState, dt: number): TickEvents {
   updateMarket(s, dt);
 
   // 1. Добыча: качалки делят свободное место в хранилище пропорционально своей добыче.
-  const pumps: Array<{ index: number; amount: number; b: GameState['buildings'][number] }> = [];
+  //    Каждая тянет нефть из своей зоны дренирования пропорционально остаткам клеток (зона истощается равномерно).
+  const pumps: Array<{ tiles: number[]; amount: number; b: GameState['buildings'][number] }> = [];
   let wanted = 0;
   for (const b of s.buildings) {
     if (b.type !== 'pumpjack') continue;
-    const index = tileIndex(s, b.x, b.y);
-    if (s.map.reserve[index] <= 0) {
+    const tiles = drainageTiles(s, b);
+    const pool = tiles.reduce((sum, i) => sum + s.map.reserve[i], 0);
+    if (pool <= 0) {
       b.status = 'depleted';
       continue;
     }
@@ -30,17 +31,24 @@ export function tick(s: GameState, dt: number): TickEvents {
       b.status = 'off';
       continue;
     }
-    const amount = Math.min(s.map.reserve[index], pumpRate(s, b) * dt);
-    pumps.push({ index, amount, b });
+    const amount = Math.min(pool, pumpRate(s, b) * dt);
+    pumps.push({ tiles, amount, b });
     wanted += amount;
   }
   const free = Math.max(0, storageCapacity(s) - s.oil);
   const share = wanted > 0 ? Math.min(1, free / wanted) : 1;
   let produced = 0;
   for (const p of pumps) {
-    const got = p.amount * share;
-    s.map.reserve[p.index] = Math.max(0, s.map.reserve[p.index] - got);
-    produced += got;
+    const target = p.amount * share;
+    // Остатки зоны пересчитываются здесь: соседние скважины могут делить клетку.
+    const pool = p.tiles.reduce((sum, i) => sum + s.map.reserve[i], 0);
+    if (pool > 0) {
+      for (const i of p.tiles) {
+        const take = Math.min(s.map.reserve[i], (target * s.map.reserve[i]) / pool);
+        s.map.reserve[i] -= take;
+        produced += take;
+      }
+    }
     p.b.status = share < 0.999 ? 'full' : 'ok';
   }
   s.oil += produced;

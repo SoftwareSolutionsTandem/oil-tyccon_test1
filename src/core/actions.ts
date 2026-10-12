@@ -32,11 +32,17 @@ export function canBuild(s: GameState, type: BuildableType, x: number, y: number
   if (type === 'pumpjack') {
     if (!hasDeposit) return fail('Качалку можно поставить только на месторождение');
     if (s.map.reserve[tileIndex(s, x, y)] <= 0) return fail('Месторождение исчерпано');
+    if (hasNeighborPump(s, x, y)) return fail('Слишком близко к другой скважине: между ними нужна клетка');
   } else if (hasDeposit) {
     return fail('Не занимайте месторождение — здесь можно добывать нефть');
   }
   if (s.cash < buildCost(s, type)) return fail('Недостаточно денег');
   return OK;
+}
+
+/** Скважины не ставят вплотную: соседняя по стороне клетка уже в зоне дренирования соседа. */
+export function hasNeighborPump(s: GameState, x: number, y: number): boolean {
+  return s.buildings.some((b) => b.type === 'pumpjack' && Math.abs(b.x - x) + Math.abs(b.y - y) === 1);
 }
 
 export function build(s: GameState, type: BuildableType, x: number, y: number): ActionResult {

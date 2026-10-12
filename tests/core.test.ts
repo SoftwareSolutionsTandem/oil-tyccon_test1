@@ -45,6 +45,17 @@ function freeOwnedTile(s: GameState) {
   throw new Error('нет свободной клетки');
 }
 
+/** Оставляет у клетки только собственные запасы: соседние клетки месторождения обнуляются. */
+function isolate(s: GameState, x: number, y: number, amount: number) {
+  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const j = (y + dy) * s.map.size + x + dx;
+    s.map.reserve[j] = s.map.initial[j] = 0;
+  }
+  const i = y * s.map.size + x;
+  s.map.reserve[i] = s.map.initial[i] = amount;
+  return i;
+}
+
 function run(s: GameState, seconds: number) {
   for (let i = 0; i < Math.round(seconds / TICK); i++) tick(s, TICK);
 }
@@ -120,7 +131,9 @@ describe('добыча и хранение', () => {
   it('добытое равно убыли запасов месторождений', () => {
     const s = createNewGame(3);
     const before = s.map.reserve.reduce((a, b) => a + b, 0);
-    for (const d of ownedDeposits(s).slice(0, 2)) build(s, 'pumpjack', d.x, d.y);
+    s.cash = 1e6;
+    for (const d of ownedDeposits(s)) build(s, 'pumpjack', d.x, d.y);
+    expect(s.buildings.filter((b) => b.type === 'pumpjack').length).toBeGreaterThanOrEqual(2);
     run(s, 100);
     const after = s.map.reserve.reduce((a, b) => a + b, 0);
     expect(before - after).toBeCloseTo(s.totals.produced, 6);
@@ -130,8 +143,7 @@ describe('добыча и хранение', () => {
   it('месторождение истощается, добыча падает и останавливается', () => {
     const s = createNewGame(3);
     const d = ownedDeposits(s)[0];
-    const i = d.y * s.map.size + d.x;
-    s.map.reserve[i] = s.map.initial[i] = 5;
+    const i = isolate(s, d.x, d.y, 5);
     s.cash = 1e6;
     build(s, 'pumpjack', d.x, d.y);
     run(s, 120);
@@ -242,7 +254,7 @@ describe('детерминизм, сохранения, офлайн', () => {
     const s = createNewGame(17);
     s.unlocked.push('terminal', 'tank');
     s.cash = 1e5;
-    for (const d of ownedDeposits(s).slice(0, 3)) build(s, 'pumpjack', d.x, d.y);
+    for (const d of ownedDeposits(s)) build(s, 'pumpjack', d.x, d.y);
     const t = freeOwnedTile(s);
     build(s, 'terminal', t.x, t.y);
     const report = simulateOffline(s, 3600);
@@ -260,8 +272,7 @@ describe('прогноз истощения', () => {
     s.unlocked.push('terminal');
     s.cash = 1e6;
     const d = ownedDeposits(s)[0];
-    const i = d.y * s.map.size + d.x;
-    s.map.reserve[i] = s.map.initial[i] = 40;
+    const i = isolate(s, d.x, d.y, 40);
     build(s, 'pumpjack', d.x, d.y);
     const t = freeOwnedTile(s);
     build(s, 'terminal', t.x, t.y); // терминал не даёт складу переполниться
@@ -273,5 +284,63 @@ describe('прогноз истощения', () => {
     }
     // Хвост истощения асимптотически не бесконечен (добыча не ниже 40%), поэтому прогноз точен до шага.
     expect(Math.abs(elapsed - predicted)).toBeLessThan(predicted * 0.02 + 1);
+  });
+});
+
+describe('расстановка скважин и зона дренирования', () => {
+  it('качалки нельзя ставить вплотную по стороне, по диагонали — можно', () => {
+    const s = createNewGame(4);
+    s.cash = 1e6;
+    const x = 20;
+    const y = 20;
+    for (const [dx, dy] of [[0, 0], [1, 0], [1, 1], [0, 1]]) {
+      const i = (y + dy) * s.map.size + x + dx;
+      s.map.reserve[i] = s.map.initial[i] = 1000;
+    }
+    expect(build(s, 'pumpjack', x, y).ok).toBe(true);
+    expect(build(s, 'pumpjack', x + 1, y)).toEqual({ ok: false, reason: 'Слишком близко к другой скважине: между ними нужна клетка' });
+    expect(build(s, 'pumpjack', x, y + 1).ok).toBe(false);
+    expect(build(s, 'pumpjack', x + 1, y + 1).ok).toBe(true);
+  });
+
+  it('скважина тянет нефть из соседних клеток месторождения равномерно', async () => {
+    const { drainageTiles } = await import('../src/core');
+    const s = createNewGame(4);
+    s.cash = 1e6;
+    const x = 20;
+    const y = 20;
+    const own = isolate(s, x, y, 1000);
+    const side = y * s.map.size + x + 1;
+    s.map.reserve[side] = s.map.initial[side] = 1000;
+    build(s, 'pumpjack', x, y);
+    expect(drainageTiles(s, s.buildings[1])).toEqual([own, side]);
+    s.unlocked.push('terminal');
+    const t = freeOwnedTile(s);
+    build(s, 'terminal', t.x, t.y);
+    run(s, 200);
+    expect(s.map.reserve[own]).toBeLessThan(1000);
+    expect(s.map.reserve[own]).toBeCloseTo(s.map.reserve[side], 6);
+    expect(2000 - s.map.reserve[own] - s.map.reserve[side]).toBeCloseTo(s.totals.produced, 6);
+  });
+
+  it('две скважины, делящие клетку, не уводят запасы в минус', () => {
+    const s = createNewGame(4);
+    s.cash = 1e6;
+    s.unlocked.push('terminal');
+    const x = 20;
+    const y = 20;
+    for (let dy = -2; dy <= 3; dy++)
+      for (let dx = -2; dx <= 3; dx++) {
+        const i = (y + dy) * s.map.size + x + dx;
+        s.map.reserve[i] = s.map.initial[i] = dx >= 0 && dx <= 1 && dy >= 0 && dy <= 1 ? 30 : 0;
+      }
+    build(s, 'pumpjack', x, y);
+    build(s, 'pumpjack', x + 1, y + 1);
+    const t = freeOwnedTile(s);
+    build(s, 'terminal', t.x, t.y);
+    run(s, 600);
+    expect(Math.min(...s.map.reserve)).toBeGreaterThanOrEqual(0);
+    expect(s.totals.produced).toBeCloseTo(120, 6);
+    expect(s.buildings.filter((b) => b.type === 'pumpjack').every((b) => b.status === 'depleted')).toBe(true);
   });
 });

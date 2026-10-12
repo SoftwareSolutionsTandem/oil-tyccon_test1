@@ -292,22 +292,21 @@ export class Hud {
     if (b.type === 'hq') {
       return `${head}${kv('Склад при конторе', bbl(core.HQ_STORAGE))}${kv('Продажа перекупщику', `${price(core.manualSellPrice(s))} за барр.`)}<div class="small">Здесь начинается ваша компания. Перекупщик забирает нефть сразу, но платит на 20% меньше рынка.</div>`;
     }
-    const i = core.tileIndex(s, b.x, b.y);
     const spec = core.levelSpec(b);
     const next = core.upgradeCost(b) !== null ? core.BUILDINGS[b.type].levels[b.level] : null;
     if (b.type === 'pumpjack') {
       const r = core.pumpRate(s, b);
-      const reserve = s.map.reserve[i];
-      const initial = s.map.initial[i];
+      const pool = core.drainagePool(s, b);
+      const zone = core.drainageTiles(s, b).length;
       const timeLeft = core.timeToDeplete(s, b);
       return `${head}
         ${kv('Добыча', rate(r * 60))}
         ${kv('Выручка при текущей цене', `${money(r * 60 * s.market.price)}/мин`)}
         ${upkeep}
-        ${kv('Запасы клетки', `${num(reserve)} / ${num(initial)}`)}
+        ${kv(`Запасы зоны (${zone} кл.)`, `${num(pool.reserve)} / ${num(pool.initial)}`)}
         ${kv('Хватит при работе без простоев', r > 0 ? duration(timeLeft) : '—')}
         ${next ? `<div class="sep"></div>${kv('След. уровень: добыча', rate(next.value * 60 * (r / spec.value || 1)))}${kv('След. уровень: содержание', `${money(next.upkeep * 60)}/мин`)}` : ''}
-        <div class="small" style="margin-top:6px">Добыча снижается по мере истощения запасов (до ${Math.round(core.DEPLETION_MIN_FACTOR * 100)}% от номинала).</div>`;
+        <div class="small" style="margin-top:6px">Скважина тянет нефть из своей клетки и соседних по сторонам клеток месторождения (зона подсвечена). Добыча снижается по мере истощения (до ${Math.round(core.DEPLETION_MIN_FACTOR * 100)}% от номинала).</div>`;
     }
     if (b.type === 'tank') {
       return `${head}${kv('Ёмкость', bbl(spec.value))}${upkeep}${kv('Всё хранилище', `${num(s.oil)} / ${num(core.storageCapacity(s))}`)}${next ? `<div class="sep"></div>${kv('След. уровень: ёмкость', bbl(next.value))}` : ''}`;
@@ -372,7 +371,10 @@ export class Hud {
       let reason = '';
       if (g.hover) {
         const r = core.canBuild(s, g.mode, g.hover.x, g.hover.y);
-        reason = r.ok ? ' · можно строить' : ` · ${r.reason}`;
+        if (r.ok && g.mode === 'pumpjack') {
+          const probe = { id: -1, type: 'pumpjack' as const, x: g.hover.x, y: g.hover.y, level: 1, enabled: true, invested: 0, status: 'ok' as const };
+          reason = ` · зона: ${core.drainageTiles(s, probe).length} кл., ${bbl(core.drainagePool(s, probe).reserve)}`;
+        } else reason = r.ok ? ' · можно строить' : ` · ${r.reason}`;
       }
       text = `Строительство: ${name} (${money(core.buildCost(s, g.mode))})${reason}. ЛКМ — поставить, ПКМ или Esc — отмена`;
     } else if (g.hover && core.inBounds(s, g.hover.x, g.hover.y)) {

@@ -1,4 +1,5 @@
 import {
+  drainageTiles,
   PARCEL_SIZE,
   PARCELS_PER_SIDE,
   isParcelOwned,
@@ -230,6 +231,20 @@ export class Renderer {
       ctx.fillRect(px * PARCEL_SIZE, py * PARCEL_SIZE, PARCEL_SIZE, PARCEL_SIZE);
     }
     const selected = s.buildings.find((b) => b.id === view.selectedBuilding);
+    // Зона дренирования: при выборе качалки и при её размещении.
+    let zoneOf: Building | null = selected?.type === 'pumpjack' ? selected : null;
+    if (view.ghost?.type === 'pumpjack' && view.ghost.ok && view.hover) {
+      zoneOf = { id: -1, type: 'pumpjack', x: view.hover.x, y: view.hover.y, level: 1, enabled: true, invested: 0, status: 'ok' };
+    }
+    if (zoneOf && s.map.initial[zoneOf.y * n + zoneOf.x] > 0) {
+      for (const i of drainageTiles(s, zoneOf)) {
+        const zx = i % n;
+        const zy = Math.floor(i / n);
+        ctx.fillStyle = 'rgba(92,225,230,0.16)';
+        ctx.fillRect(zx, zy, 1, 1);
+        this.tileOutline(zx, zy, 'rgba(92,225,230,0.55)', 0.025);
+      }
+    }
     if (selected) this.tileOutline(selected.x, selected.y, 'rgba(92,225,230,0.95)', 0.05);
     if (view.hover) {
       if (view.ghost) {

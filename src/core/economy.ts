@@ -47,24 +47,57 @@ export function storageCapacity(s: GameState): number {
   return cap;
 }
 
+const SIDES: ReadonlyArray<readonly [number, number]> = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+];
+
+/**
+ * Зона дренирования скважины: своя клетка и соседние по сторонам клетки месторождения,
+ * не занятые другими качалками. Скважина тянет нефть из всей зоны.
+ */
+export function drainageTiles(s: GameState, b: Building): number[] {
+  const own = tileIndex(s, b.x, b.y);
+  const out = [own];
+  for (const [dx, dy] of SIDES) {
+    const x = b.x + dx;
+    const y = b.y + dy;
+    if (x < 0 || y < 0 || x >= s.map.size || y >= s.map.size) continue;
+    const i = tileIndex(s, x, y);
+    if (s.map.initial[i] <= 0) continue;
+    if (s.buildings.some((o) => o.type === 'pumpjack' && o.x === x && o.y === y)) continue;
+    out.push(i);
+  }
+  return out;
+}
+
+/** Остаток и начальные запасы зоны дренирования. */
+export function drainagePool(s: GameState, b: Building): { reserve: number; initial: number } {
+  let reserve = 0;
+  let initial = 0;
+  for (const i of drainageTiles(s, b)) {
+    reserve += s.map.reserve[i];
+    initial += s.map.initial[i];
+  }
+  return { reserve, initial };
+}
+
 /** Текущая добыча качалки без учёта ограничения хранилища, барр./с. */
 export function pumpRate(s: GameState, b: Building): number {
-  const i = tileIndex(s, b.x, b.y);
-  const initial = s.map.initial[i];
-  const reserve = s.map.reserve[i];
-  if (initial <= 0 || reserve <= 0) return 0;
-  const factor = DEPLETION_MIN_FACTOR + (1 - DEPLETION_MIN_FACTOR) * (reserve / initial);
+  const pool = drainagePool(s, b);
+  if (pool.initial <= 0 || pool.reserve <= 0) return 0;
+  const factor = DEPLETION_MIN_FACTOR + (1 - DEPLETION_MIN_FACTOR) * (pool.reserve / pool.initial);
   return levelSpec(b).value * factor;
 }
 
 /**
- * Сколько секунд проработает качалка до полного истощения клетки.
+ * Сколько секунд проработает качалка до полного истощения зоны (если её не делят с другими скважинами).
  * Добыча падает вместе с запасами: dr/dt = −v·(m + (1−m)·r/R), откуда t = R/(v(1−m))·ln(1 + (1−m)·r/(m·R)).
  */
 export function timeToDeplete(s: GameState, b: Building): number {
-  const i = tileIndex(s, b.x, b.y);
-  const R = s.map.initial[i];
-  const r = s.map.reserve[i];
+  const { reserve: r, initial: R } = drainagePool(s, b);
   if (R <= 0 || r <= 0) return 0;
   const m = DEPLETION_MIN_FACTOR;
   const v = levelSpec(b).value;

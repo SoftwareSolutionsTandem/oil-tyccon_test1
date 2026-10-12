@@ -14,11 +14,14 @@ export function createDemoState(): GameState {
   for (let y = 0; y < s.map.size; y++)
     for (let x = 0; x < s.map.size; x++)
       if (s.map.initial[core.tileIndex(s, x, y)] > 0 && core.isTileOwned(s, x, y)) deposits.push([x, y]);
-  deposits.forEach(([x, y], i) => {
-    core.build(s, 'pumpjack', x, y);
+  // Скважины ставятся жадно: соседние по стороне клетки отклоняются правилом расстановки.
+  let placed = 0;
+  for (const [x, y] of deposits) {
+    if (!core.build(s, 'pumpjack', x, y).ok) continue;
     const b = core.buildingAt(s, x, y)!;
-    for (let l = 1; l < 1 + (i % 3); l++) core.upgrade(s, b.id);
-  });
+    for (let l = 1; l < 1 + (placed % 3); l++) core.upgrade(s, b.id);
+    placed++;
+  }
   const spots: Array<[number, number, 'tank' | 'terminal', number]> = [
     [hx + 2, hy, 'tank', 1],
     [hx + 3, hy, 'tank', 2],

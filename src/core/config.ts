@@ -65,7 +65,7 @@ export interface BuildingSpec {
 export const BUILDINGS: Record<BuildableType, BuildingSpec> = {
   pumpjack: {
     name: 'Станок-качалка',
-    description: 'Добывает нефть. Строится только на месторождении; добыча падает по мере истощения.',
+    description: 'Добывает нефть из своей клетки и соседних клеток месторождения. Скважины не ставят вплотную: между ними нужна клетка.',
     valueLabel: 'Добыча',
     valueUnit: 'барр./с',
     levels: [
