@@ -4,10 +4,11 @@ export type BuildableType = Exclude<BuildingType, 'hq'>;
 /**
  * Состояние здания после последнего тика:
  * ok — работает; off — законсервировано игроком; depleted — месторождение исчерпано;
- * full — добыча ограничена заполненным хранилищем; waiting_price — терминал ждёт нужной цены;
- * no_oil — терминалу нечего продавать.
+ * full — добыча ограничена заполненным хранилищем своей сети; waiting_price — терминал ждёт нужной цены;
+ * no_oil — терминалу нечего продавать; no_route — нет трубопровода к хранилищу;
+ * throttled — добыча ограничена пропускной способностью трубопровода.
  */
-export type BuildingStatus = 'ok' | 'off' | 'depleted' | 'full' | 'waiting_price' | 'no_oil';
+export type BuildingStatus = 'ok' | 'off' | 'depleted' | 'full' | 'waiting_price' | 'no_oil' | 'no_route' | 'throttled';
 
 export interface Building {
   id: number;
@@ -20,7 +21,12 @@ export interface Building {
   /** Сколько денег вложено в здание (строительство + улучшения) — основа для компенсации при сносе. */
   invested: number;
   status: BuildingStatus;
+  /** Нефть в этом хранилище (только у конторы и резервуаров), баррели. */
+  stored?: number;
 }
+
+/** Тип трубопровода на клетке: 0 — нет, 1 — промысловый, 2 — магистральный. */
+export type PipeKind = 0 | 1 | 2;
 
 export interface WorldMap {
   size: number;
@@ -32,6 +38,8 @@ export interface WorldMap {
   decor: number[];
   /** Принадлежит ли игроку участок. Индекс: py * parcelsPerSide + px. */
   owned: boolean[];
+  /** Трубопровод на клетке (PipeKind). Индекс как у reserve. */
+  pipes: number[];
 }
 
 /** Денежные и товарные потоки за одну секунду игрового времени. */
@@ -65,7 +73,7 @@ export interface GameState {
   /** Игровое время, секунды. */
   time: number;
   cash: number;
-  /** Нефть на складе, баррели. */
+  /** Вся нефть во всех хранилищах, баррели. Производная величина: сумма Building.stored, пересчитывается после каждого изменения. */
   oil: number;
   map: WorldMap;
   buildings: Building[];

@@ -1,5 +1,6 @@
 import { countOf, lastMinute } from './economy';
 import type { BuildableType, GameState } from './types';
+import { isConnected } from './network';
 import { ownedParcelCount } from './world';
 
 export interface Objective {
@@ -22,6 +23,13 @@ export const OBJECTIVES: Objective[] = [
     description: 'Постройте станок-качалку на тёмном пятне месторождения.',
     reward: 150,
     progress: (s) => ({ current: countOf(s, 'pumpjack'), target: 1 }),
+  },
+  {
+    id: 'connect',
+    title: 'Нефть в трубу',
+    description: 'Подключите качалку к конторе трубопроводом: инструмент «Трубопровод» (4) или кнопка «Подключить» у качалки.',
+    reward: 150,
+    progress: (s) => ({ current: s.buildings.some((b) => b.type === 'pumpjack' && isConnected(s, b)) ? 1 : 0, target: 1 }),
   },
   {
     id: 'first_sales',

@@ -106,5 +106,24 @@ export const BUILDINGS: Record<BuildableType, BuildingSpec> = {
 
 export const HQ_NAME = 'Контора';
 
+export interface PipeSpec {
+  name: string;
+  /** Стоимость клетки, $. */
+  cost: number;
+  /** Пропускная способность, барр./с. */
+  capacity: number;
+}
+
+/**
+ * Трубопроводы. Цена за клетку мала по сравнению со зданиями: длинное подключение — это решение о маршруте,
+ * а не денежный штраф. Пропускная способность — ограничение, которое со временем требует магистрали.
+ */
+export const PIPES: Record<1 | 2, PipeSpec> = {
+  1: { name: 'Промысловый трубопровод', cost: 10, capacity: 2 },
+  2: { name: 'Магистральный трубопровод', cost: 30, capacity: 8 },
+};
+/** Доля стоимости трубы, возвращаемая при демонтаже. */
+export const PIPE_REFUND = 0.5;
+
 export const PARCEL_BASE_PRICE = 3000;
 export const PARCEL_PRICE_GROWTH = 1.7;

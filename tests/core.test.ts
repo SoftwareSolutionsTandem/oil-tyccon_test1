@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  autoConnect,
+  isConnected,
+  syncOil,
   build,
   buildCost,
   buyParcel,
@@ -41,7 +44,7 @@ function freeOwnedTile(s: GameState) {
   const y0 = START_PARCEL.py * PARCEL_SIZE;
   for (let y = y0; y < y0 + PARCEL_SIZE; y++)
     for (let x = x0; x < x0 + PARCEL_SIZE; x++)
-      if (s.map.initial[y * s.map.size + x] === 0 && !s.buildings.some((b) => b.x === x && b.y === y)) return { x, y };
+      if (s.map.initial[y * s.map.size + x] === 0 && !s.map.pipes[y * s.map.size + x] && !s.buildings.some((b) => b.x === x && b.y === y)) return { x, y };
   throw new Error('нет свободной клетки');
 }
 
@@ -56,7 +59,24 @@ function isolate(s: GameState, x: number, y: number, amount: number) {
   return i;
 }
 
+/** Подключает трубами все неподключённые здания — как сделал бы аккуратный игрок. */
+function connectAll(s: GameState) {
+  for (const type of ['tank', 'pumpjack', 'terminal'])
+    for (const b of s.buildings) if (b.type === type && !isConnectedAny(s, b)) autoConnect(s, b.id);
+}
+
+function isConnectedAny(s: GameState, b: GameState['buildings'][number]) {
+  return b.type === 'tank' ? false : isConnected(s, b);
+}
+
+/** Кладёт нефть в контору (тесты продаж). */
+function putOil(s: GameState, amount: number) {
+  s.buildings.find((b) => b.type === 'hq')!.stored = amount;
+  syncOil(s);
+}
+
 function run(s: GameState, seconds: number) {
+  connectAll(s);
   for (let i = 0; i < Math.round(seconds / TICK); i++) tick(s, TICK);
 }
 
@@ -156,7 +176,7 @@ describe('добыча и хранение', () => {
 describe('продажи', () => {
   it('ручная продажа идёт со скидкой перекупщика', () => {
     const s = createNewGame(5);
-    s.oil = 50;
+    putOil(s, 50);
     const price = s.market.price;
     const r = sellManual(s);
     expect(r.ok).toBe(true);
@@ -172,7 +192,8 @@ describe('продажи', () => {
     s.cash = 1e6;
     const t = freeOwnedTile(s);
     build(s, 'terminal', t.x, t.y);
-    s.oil = 50;
+    connectAll(s);
+    putOil(s, 50);
     setSellThreshold(s, 1000);
     run(s, 5);
     expect(s.oil).toBe(50);
@@ -213,8 +234,11 @@ describe('цели', () => {
     const d = ownedDeposits(s)[0];
     build(s, 'pumpjack', d.x, d.y);
     tick(s, TICK);
-    expect(s.objectiveIndex).toBe(1);
-    s.oil = 100;
+    expect(s.objectiveIndex).toBe(1); // следующая цель — подключить качалку
+    connectAll(s);
+    tick(s, TICK);
+    expect(s.objectiveIndex).toBe(2);
+    putOil(s, 100);
     sellManual(s);
     const events = tick(s, TICK);
     expect(events.completed.map((o) => o.id)).toEqual(['first_sales']);
@@ -257,6 +281,7 @@ describe('детерминизм, сохранения, офлайн', () => {
     for (const d of ownedDeposits(s)) build(s, 'pumpjack', d.x, d.y);
     const t = freeOwnedTile(s);
     build(s, 'terminal', t.x, t.y);
+    connectAll(s);
     const report = simulateOffline(s, 3600);
     expect(report.seconds).toBe(3600);
     expect(report.produced).toBeGreaterThan(1000);
@@ -276,6 +301,7 @@ describe('прогноз истощения', () => {
     build(s, 'pumpjack', d.x, d.y);
     const t = freeOwnedTile(s);
     build(s, 'terminal', t.x, t.y); // терминал не даёт складу переполниться
+    connectAll(s);
     const predicted = timeToDeplete(s, s.buildings[1]);
     let elapsed = 0;
     while (s.map.reserve[i] > 1e-6 && elapsed < 10_000) {

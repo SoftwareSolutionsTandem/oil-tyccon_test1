@@ -13,6 +13,8 @@ const STATUS_TEXT: Record<Building['status'], [string, 'ok' | 'warn' | 'bad']> =
   full: ['Простой: хранилище заполнено', 'bad'],
   waiting_price: ['Ждёт цену выше порога', 'warn'],
   no_oil: ['Нет нефти для отгрузки', 'warn'],
+  no_route: ['Не подключено к хранилищу', 'bad'],
+  throttled: ['Ограничено пропускной способностью трубы', 'warn'],
 };
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', html = ''): HTMLElementTagNameMap[K] {

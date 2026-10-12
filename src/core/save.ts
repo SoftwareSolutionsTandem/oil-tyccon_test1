@@ -1,3 +1,6 @@
+import { planAutoConnect } from './actions';
+import { levelSpec } from './economy';
+import { syncOil } from './network';
 import { createNewGame, SAVE_VERSION } from './state';
 import type { GameState } from './types';
 
@@ -28,8 +31,37 @@ export function deserialize(json: string): GameState | null {
   ) {
     return null;
   }
-  // Миграции будущих версий сохранений добавляются здесь.
-  return { ...reference, ...s, version: SAVE_VERSION };
+  const state: GameState = { ...reference, ...s };
+  if (s.version < 2) migrateV1(state, reference);
+  else if (!Array.isArray(state.map.pipes) || state.map.pipes.length !== reference.map.pipes.length) return null;
+  state.version = SAVE_VERSION;
+  return state;
+}
+
+/**
+ * v1 → v2: появилась сеть трубопроводов и локальные хранилища.
+ * - Общий запас нефти распределяется по хранилищам пропорционально ёмкости (ни баррель не теряется).
+ * - Старые предприятия работали «по воздуху»; чтобы ничего не сломалось, существующие резервуары, качалки и терминалы
+ *   бесплатно подключаются кратчайшими трубами по своей земле — аналог трубопроводов, которые раньше только рисовались.
+ *   Деньги, здания и земля не меняются; бесплатные трубы не входят во вложения.
+ * - В цепочку целей вставлена цель «Нефть в трубу» (индекс 1): номер текущей цели сдвигается.
+ */
+function migrateV1(s: GameState, reference: GameState): void {
+  s.map = { ...s.map, pipes: new Array<number>(reference.map.pipes.length).fill(0) };
+  const storages = s.buildings.filter((b) => b.type === 'hq' || b.type === 'tank');
+  const cap = storages.reduce((sum, b) => sum + levelSpec(b).value, 0);
+  for (const b of storages) b.stored = cap > 0 ? (s.oil * levelSpec(b).value) / cap : 0;
+  const order = [...s.buildings].sort((a, b) => a.id - b.id);
+  for (const type of ['tank', 'pumpjack', 'terminal'] as const) {
+    for (const b of order) {
+      if (b.type !== type) continue;
+      const plan = planAutoConnect({ ...s, cash: Infinity }, b.id, 1);
+      if (!plan.ok) continue; // уже подключено или нет пути по своей земле — интерфейс покажет предупреждение
+      for (const [x, y] of plan.tiles) s.map.pipes[y * s.map.size + x] = 1;
+    }
+  }
+  syncOil(s);
+  if (s.objectiveIndex >= 1) s.objectiveIndex += 1;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {

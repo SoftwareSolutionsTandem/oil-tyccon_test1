@@ -1,5 +1,6 @@
 import { MARKET, OFFLINE_CAP } from './config';
-import { advanceStats, buildingUpkeep, drainageTiles, pumpRate, recordStat, storageCapacity, terminalThroughput } from './economy';
+import { advanceStats, buildingUpkeep, recordStat } from './economy';
+import { stepLogistics } from './network';
 import { checkObjectives, type Objective } from './objectives';
 import { Rng } from './rng';
 import type { GameState, Totals } from './types';
@@ -15,64 +16,18 @@ export function tick(s: GameState, dt: number): TickEvents {
   s.time += dt;
   updateMarket(s, dt);
 
-  // 1. Добыча: качалки делят свободное место в хранилище пропорционально своей добыче.
-  //    Каждая тянет нефть из своей зоны дренирования пропорционально остаткам клеток (зона истощается равномерно).
-  const pumps: Array<{ tiles: number[]; amount: number; b: GameState['buildings'][number] }> = [];
-  let wanted = 0;
-  for (const b of s.buildings) {
-    if (b.type !== 'pumpjack') continue;
-    const tiles = drainageTiles(s, b);
-    const pool = tiles.reduce((sum, i) => sum + s.map.reserve[i], 0);
-    if (pool <= 0) {
-      b.status = 'depleted';
-      continue;
-    }
-    if (!b.enabled) {
-      b.status = 'off';
-      continue;
-    }
-    const amount = Math.min(pool, pumpRate(s, b) * dt);
-    pumps.push({ tiles, amount, b });
-    wanted += amount;
-  }
-  const free = Math.max(0, storageCapacity(s) - s.oil);
-  const share = wanted > 0 ? Math.min(1, free / wanted) : 1;
-  let produced = 0;
-  for (const p of pumps) {
-    const target = p.amount * share;
-    // Остатки зоны пересчитываются здесь: соседние скважины могут делить клетку.
-    const pool = p.tiles.reduce((sum, i) => sum + s.map.reserve[i], 0);
-    if (pool > 0) {
-      for (const i of p.tiles) {
-        const take = Math.min(s.map.reserve[i], (target * s.map.reserve[i]) / pool);
-        s.map.reserve[i] -= take;
-        produced += take;
-      }
-    }
-    p.b.status = share < 0.999 ? 'full' : 'ok';
-  }
-  s.oil += produced;
-  s.totals.produced += produced;
-  recordStat(s, 'produced', produced);
-
-  // 2. Автоматическая продажа через терминалы.
-  const terminals = s.buildings.filter((b) => b.type === 'terminal');
-  const throughput = terminalThroughput(s);
+  // 1–2. Логистика: добыча через сеть трубопроводов в хранилища своей сети и продажа через терминалы этой сети.
   const priceOk = s.market.price >= s.sellThreshold;
-  const autoSold = priceOk ? Math.min(s.oil, throughput * dt) : 0;
-  const autoRevenue = autoSold * s.market.price;
-  s.oil -= autoSold;
+  const flow = stepLogistics(s, dt, s.market.price, priceOk);
+  s.totals.produced += flow.produced;
+  recordStat(s, 'produced', flow.produced);
+  const autoSold = flow.sold;
+  const autoRevenue = flow.revenue;
   s.cash += autoRevenue;
   s.totals.sold += autoSold;
   s.totals.revenue += autoRevenue;
   recordStat(s, 'sold', autoSold);
   recordStat(s, 'revenue', autoRevenue);
-  for (const b of terminals) {
-    if (!b.enabled) b.status = 'off';
-    else if (!priceOk) b.status = 'waiting_price';
-    else if (autoSold <= 1e-9) b.status = 'no_oil';
-    else b.status = 'ok';
-  }
 
   // 3. Содержание зданий.
   let upkeep = 0;

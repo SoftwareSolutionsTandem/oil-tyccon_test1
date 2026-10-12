@@ -3,7 +3,7 @@ import { emptyBucket } from './economy';
 import { Rng } from './rng';
 import type { GameState, WorldMap } from './types';
 
-export const SAVE_VERSION = 1;
+export const SAVE_VERSION = 2;
 
 export function createNewGame(seed: number = (Math.random() * 2 ** 31) | 0): GameState {
   const map = generateMap(seed);
@@ -34,6 +34,7 @@ export function createNewGame(seed: number = (Math.random() * 2 ** 31) | 0): Gam
     enabled: true,
     invested: 0,
     status: 'ok',
+    stored: 0,
   });
   return state;
 }
@@ -71,7 +72,7 @@ function generateMap(seed: number): WorldMap {
   }
   decor[HQ_POS.y * size + HQ_POS.x] = 0;
 
-  return { size, reserve, initial: [...reserve], decor, owned };
+  return { size, reserve, initial: [...reserve], decor, owned, pipes: new Array<number>(size * size).fill(0) };
 }
 
 function growBlob(

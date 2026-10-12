@@ -7,3 +7,4 @@ export * from './sim';
 export * from './state';
 export * from './types';
 export * from './world';
+export * from './network';
