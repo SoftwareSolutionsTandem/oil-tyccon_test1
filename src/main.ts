@@ -1,5 +1,6 @@
 import './style.css';
 import * as core from './core';
+import { createDemoState } from './demo';
 import { Game } from './game';
 import { Camera, worldToTile } from './render/iso';
 import { Renderer } from './render/renderer';
@@ -20,6 +21,7 @@ function loadSave(): core.GameState | null {
 }
 
 function save(): void {
+  if (demo) return; // демо-сцена не перезаписывает настоящее сохранение
   try {
     localStorage.setItem(core.SAVE_KEY, core.serialize(game.state));
   } catch {
@@ -27,15 +29,16 @@ function save(): void {
   }
 }
 
-const loaded = loadSave();
-const game = new Game(loaded ?? core.createNewGame(), renderer);
+const demo = new URLSearchParams(location.search).has('demo');
+const loaded = demo ? null : loadSave();
+const game = new Game(loaded ?? (demo ? createDemoState() : core.createNewGame()), renderer);
 const hud = new Hud(game, { newGame: startNewGame });
 renderer.adopt(game.state);
 camera.centerOnTile(core.HQ_POS.x + 3, core.HQ_POS.y + 3);
 
 if (loaded) {
   runOffline((Date.now() - loaded.savedAt) / 1000, 'Пока вас не было');
-} else {
+} else if (!demo) {
   hud.showHelp();
 }
 

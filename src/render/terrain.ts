@@ -1,0 +1,312 @@
+import { PARCEL_SIZE } from '../core';
+import { LIGHT } from './model';
+import { createCanvas, fbm, hash2, smoothstep, valueNoise } from './noise';
+
+/** Пикселей текстуры на клетку. Земля рисуется в координатах клеток и проецируется аффинным преобразованием. */
+export const TEX = 64;
+const PAD = 8;
+const STEP = 4;
+
+type RGBf = [number, number, number];
+const DIRT: RGBf = [170, 146, 108];
+const DRY: RGBf = [170, 162, 104];
+const GREEN: RGBf = [118, 138, 74];
+const SAND: RGBf = [200, 182, 138];
+const DARK: RGBf = [138, 116, 86];
+
+const mix = (a: RGBf, b: RGBf, t: number): RGBf => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
+interface Track {
+  pts: Array<[number, number]>;
+}
+
+/**
+ * Непрерывная процедурная текстура земли, разбитая на куски по участкам 8×8.
+ * Содержимое зависит только от мировых координат, поэтому перекрывающиеся поля соседних кусков
+ * совпадают и швов между ними нет.
+ */
+export class TerrainLayer {
+  private chunks = new Map<string, HTMLCanvasElement>();
+  private tracks: Track[];
+
+  constructor(
+    readonly seed: number,
+    readonly size: number,
+  ) {
+    this.tracks = this.makeTracks();
+  }
+
+  private makeTracks(): Track[] {
+    const out: Track[] = [];
+    for (let i = 0; i < 9; i++) {
+      let x = hash2(i, 1, this.seed) * this.size;
+      let y = hash2(i, 2, this.seed) * this.size;
+      let a = hash2(i, 3, this.seed) * Math.PI * 2;
+      const pts: Array<[number, number]> = [[x, y]];
+      for (let k = 0; k < 40; k++) {
+        a += (valueNoise(k * 0.3, i * 7, this.seed) - 0.5) * 0.5;
+        x += Math.cos(a) * 0.5;
+        y += Math.sin(a) * 0.5;
+        pts.push([x, y]);
+      }
+      out.push({ pts });
+    }
+    return out;
+  }
+
+  private fields(u: number, v: number) {
+    const s = this.seed;
+    return {
+      biome: fbm(u * 0.09, v * 0.09, 3, s),
+      patch: fbm(u * 0.35, v * 0.35, 3, s + 1),
+      height: fbm(u * 0.45, v * 0.45, 3, s + 2),
+      moist: fbm(u * 0.2, v * 0.2, 2, s + 3),
+    };
+  }
+
+  grassAt(u: number, v: number): number {
+    const f = this.fields(u, v);
+    return smoothstep(0.42, 0.62, f.biome + (f.patch - 0.5) * 0.35);
+  }
+
+  isBaked(px: number, py: number): boolean {
+    return this.chunks.has(`${px},${py}`);
+  }
+
+  chunk(px: number, py: number): HTMLCanvasElement | undefined {
+    return this.chunks.get(`${px},${py}`);
+  }
+
+  bake(px: number, py: number): HTMLCanvasElement {
+    const key = `${px},${py}`;
+    const existing = this.chunks.get(key);
+    if (existing) return existing;
+    const size = PARCEL_SIZE * TEX + PAD * 2;
+    const canvas = createCanvas(size, size);
+    const ctx = canvas.getContext('2d')!;
+    const u0 = px * PARCEL_SIZE - PAD / TEX;
+    const v0 = py * PARCEL_SIZE - PAD / TEX;
+
+    // 1. Низкочастотные поля на грубой сетке.
+    const gw = Math.ceil(size / STEP) + 2;
+    const fBase: RGBf[] = new Array(gw * gw);
+    const fHeight = new Float32Array(gw * gw);
+    for (let gy = 0; gy < gw; gy++) {
+      for (let gx = 0; gx < gw; gx++) {
+        const u = u0 + (gx * STEP) / TEX;
+        const v = v0 + (gy * STEP) / TEX;
+        const f = this.fields(u, v);
+        const grass = smoothstep(0.42, 0.62, f.biome + (f.patch - 0.5) * 0.35);
+        let c = mix(DIRT, mix(DRY, GREEN, smoothstep(0.42, 0.68, f.moist)), grass);
+        c = mix(c, SAND, smoothstep(0.6, 0.74, f.patch) * (1 - grass * 0.7));
+        c = mix(c, DARK, smoothstep(0.62, 0.8, f.moist) * (1 - grass) * 0.4);
+        fBase[gy * gw + gx] = c;
+        fHeight[gy * gw + gx] = f.height;
+      }
+    }
+
+    // 2. Попиксельно: интерполяция, рельефная светотень, мелкая деталь и зерно.
+    const img = ctx.createImageData(size, size);
+    const d = img.data;
+    const relief = 6;
+    for (let y = 0; y < size; y++) {
+      const gyf = y / STEP;
+      const gy = Math.floor(gyf);
+      const ty = gyf - gy;
+      for (let x = 0; x < size; x++) {
+        const gxf = x / STEP;
+        const gx = Math.floor(gxf);
+        const tx = gxf - gx;
+        const i00 = gy * gw + gx;
+        const c00 = fBase[i00];
+        const c10 = fBase[i00 + 1];
+        const c01 = fBase[i00 + gw];
+        const c11 = fBase[i00 + gw + 1];
+        const w00 = (1 - tx) * (1 - ty);
+        const w10 = tx * (1 - ty);
+        const w01 = (1 - tx) * ty;
+        const w11 = tx * ty;
+        const hu = (fHeight[i00 + 1] - fHeight[i00] + fHeight[i00 + gw + 1] - fHeight[i00 + gw]) * 0.5;
+        const hv = (fHeight[i00 + gw] - fHeight[i00] + fHeight[i00 + gw + 1] - fHeight[i00 + 1]) * 0.5;
+        const lit = 1 + (-hu * LIGHT[0] - hv * LIGHT[1]) * relief;
+        const u = u0 + x / TEX;
+        const v = v0 + y / TEX;
+        const fine = valueNoise(u * 3.2, v * 3.2, this.seed + 4) * 0.6 + valueNoise(u * 9, v * 9, this.seed + 5) * 0.4;
+        const grain = hash2(x + px * 977, y + py * 613, this.seed) - 0.5;
+        const k = lit * (0.9 + fine * 0.16) + grain * 0.06;
+        const o = (y * size + x) * 4;
+        d[o] = (c00[0] * w00 + c10[0] * w10 + c01[0] * w01 + c11[0] * w11) * k;
+        d[o + 1] = (c00[1] * w00 + c10[1] * w10 + c01[1] * w01 + c11[1] * w11) * k;
+        d[o + 2] = (c00[2] * w00 + c10[2] * w10 + c01[2] * w01 + c11[2] * w11) * k;
+        d[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+
+    // 3. Векторные детали в координатах клеток: колеи, трещины, трава, камешки.
+    ctx.setTransform(TEX, 0, 0, TEX, -u0 * TEX, -v0 * TEX);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (const t of this.tracks) {
+      for (const off of [-0.09, 0.09]) {
+        ctx.beginPath();
+        t.pts.forEach(([x, y], i) => {
+          const [nx, ny] = i + 1 < t.pts.length ? t.pts[i + 1] : t.pts[i - 1];
+          const len = Math.hypot(nx - x, ny - y) || 1;
+          const ox = (-(ny - y) / len) * off * (i + 1 < t.pts.length ? 1 : -1);
+          const oy = ((nx - x) / len) * off * (i + 1 < t.pts.length ? 1 : -1);
+          if (i === 0) ctx.moveTo(x + ox, y + oy);
+          else ctx.lineTo(x + ox, y + oy);
+        });
+        ctx.strokeStyle = 'rgba(78,62,44,0.16)';
+        ctx.lineWidth = 0.06;
+        ctx.stroke();
+      }
+    }
+    const x0 = px * PARCEL_SIZE - 1;
+    const y0 = py * PARCEL_SIZE - 1;
+    for (let ty = y0; ty < y0 + PARCEL_SIZE + 2; ty++) {
+      for (let tx = x0; tx < x0 + PARCEL_SIZE + 2; tx++) {
+        this.tileDetails(ctx, tx, ty);
+      }
+    }
+    this.chunks.set(key, canvas);
+    return canvas;
+  }
+
+  private tileDetails(ctx: CanvasRenderingContext2D, tx: number, ty: number): void {
+    const s = this.seed;
+    const h = (i: number) => hash2(tx * 31 + i, ty * 17 + i * 7, s + 11);
+    const grass = this.grassAt(tx + 0.5, ty + 0.5);
+    // Трещины на сухой земле.
+    if (grass < 0.3 && h(1) < 0.35) {
+      let x = tx + h(2);
+      let y = ty + h(3);
+      let a = h(4) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      for (let i = 0; i < 6; i++) {
+        a += (h(10 + i) - 0.5) * 1.4;
+        x += Math.cos(a) * 0.09;
+        y += Math.sin(a) * 0.09;
+        ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = 'rgba(70,56,40,0.22)';
+      ctx.lineWidth = 0.012;
+      ctx.stroke();
+    }
+    // Пучки травы.
+    const tufts = Math.round(grass * 10 + h(5) * 3);
+    for (let i = 0; i < tufts; i++) {
+      const cx = tx + h(20 + i);
+      const cy = ty + h(40 + i);
+      const g = this.grassAt(cx, cy);
+      if (g < 0.25) continue;
+      const tone = h(60 + i);
+      ctx.strokeStyle = tone < 0.5 ? 'rgba(70,86,40,0.55)' : 'rgba(176,170,104,0.5)';
+      ctx.lineWidth = 0.014;
+      ctx.beginPath();
+      for (let j = 0; j < 5; j++) {
+        const a = -Math.PI / 2 + (h(80 + i * 5 + j) - 0.5) * 2.2 + 0.6;
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + Math.cos(a) * 0.05, cy + Math.sin(a) * 0.05);
+      }
+      ctx.stroke();
+    }
+    // Камешки с собственной тенью и бликом.
+    const pebbles = Math.round(1 + (1 - grass) * 4 * h(6));
+    for (let i = 0; i < pebbles; i++) {
+      const cx = tx + h(120 + i);
+      const cy = ty + h(140 + i);
+      const r = 0.012 + h(160 + i) * 0.022;
+      const shade = 110 + h(180 + i) * 60;
+      ctx.fillStyle = 'rgba(40,32,24,0.35)';
+      ctx.beginPath();
+      ctx.ellipse(cx + r * 0.5, cy - r * 0.7, r * 1.1, r * 0.9, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = `rgb(${shade | 0},${(shade * 0.95) | 0},${(shade * 0.86) | 0})`;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, r, r * 0.8, h(200 + i) * 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,250,235,0.35)';
+      ctx.beginPath();
+      ctx.ellipse(cx - r * 0.25, cy + r * 0.3, r * 0.45, r * 0.3, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+/** Пятна нефти на поверхности: несколько вариантов, рисуются поверх земли с прозрачностью по остатку запасов. */
+export function makeStains(count: number, seed: number): HTMLCanvasElement[] {
+  const out: HTMLCanvasElement[] = [];
+  const size = 96;
+  for (let v = 0; v < count; v++) {
+    const c = createCanvas(size, size);
+    const ctx = c.getContext('2d')!;
+    const cx = size / 2;
+    const cy = size / 2;
+    const blob = (rBase: number, jag: number, s: number) => {
+      ctx.beginPath();
+      for (let i = 0; i <= 48; i++) {
+        const a = (i / 48) * Math.PI * 2;
+        const r = rBase * (0.72 + fbm(Math.cos(a) * 1.5 + v * 3, Math.sin(a) * 1.5, 3, seed + s) * jag);
+        const x = cx + Math.cos(a) * r;
+        const y = cy + Math.sin(a) * r;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+    };
+    // Пропитанный грунт вокруг.
+    blob(40, 0.7, 1);
+    const halo = ctx.createRadialGradient(cx, cy, 6, cx, cy, 44);
+    halo.addColorStop(0, 'rgba(60,46,30,0.45)');
+    halo.addColorStop(1, 'rgba(46,36,26,0)');
+    ctx.fillStyle = halo;
+    ctx.fill();
+    // Лужа нефти.
+    blob(22, 0.75, 2);
+    const pool = ctx.createRadialGradient(cx - 3, cy + 3, 2, cx, cy, 26);
+    pool.addColorStop(0, 'rgba(24,18,12,0.88)');
+    pool.addColorStop(0.6, 'rgba(36,27,18,0.78)');
+    pool.addColorStop(1, 'rgba(52,40,26,0.35)');
+    ctx.fillStyle = pool;
+    ctx.fill();
+    // Радужная плёнка и блик неба.
+    ctx.save();
+    ctx.clip();
+    const sheen = ctx.createLinearGradient(cx - 20, cy + 16, cx + 18, cy - 14);
+    sheen.addColorStop(0, 'rgba(120,90,160,0)');
+    sheen.addColorStop(0.45, 'rgba(110,140,170,0.12)');
+    sheen.addColorStop(0.6, 'rgba(170,140,90,0.1)');
+    sheen.addColorStop(1, 'rgba(120,90,160,0)');
+    ctx.fillStyle = sheen;
+    ctx.fillRect(0, 0, size, size);
+    ctx.restore();
+    out.push(c);
+  }
+  return out;
+}
+
+/** Бесшовные материалы площадок (гравий, бетон) для заливки узором. */
+export function makeGroundMaterial(kind: 'gravel' | 'concrete', seed: number): HTMLCanvasElement {
+  const size = 64;
+  const c = createCanvas(size, size);
+  const ctx = c.getContext('2d')!;
+  const img = ctx.createImageData(size, size);
+  const base = kind === 'gravel' ? [138, 130, 116] : [176, 172, 162];
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const n = fbm((x / size) * 4, (y / size) * 4, 3, seed, 4);
+      const g = hash2(x, y, seed) - 0.5;
+      const k = kind === 'gravel' ? 0.82 + n * 0.3 + g * 0.28 : 0.9 + n * 0.16 + g * 0.06;
+      const o = (y * size + x) * 4;
+      img.data[o] = base[0] * k;
+      img.data[o + 1] = base[1] * k;
+      img.data[o + 2] = base[2] * k;
+      img.data[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}

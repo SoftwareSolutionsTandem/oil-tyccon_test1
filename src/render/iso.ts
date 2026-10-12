@@ -23,7 +23,7 @@ export class Camera {
   y = 0;
   zoom = 1;
   readonly minZoom = 0.35;
-  readonly maxZoom = 2.5;
+  readonly maxZoom = 2.2;
 
   screenToWorld(sx: number, sy: number, w: number, h: number): { x: number; y: number } {
     return { x: (sx - w / 2) / this.zoom + this.x, y: (sy - h / 2) / this.zoom + this.y };

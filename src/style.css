@@ -116,3 +116,11 @@ input[type='range'] { width: 100%; accent-color: var(--accent); }
   .topbar { gap: 10px; }
   .brand { display: none; }
 }
+
+/* Виньетка поверх сцены — силами браузера, без перерисовки холста. */
+#vignette {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, rgba(10, 14, 20, 0) 55%, rgba(10, 14, 20, 0.42) 100%);
+}
