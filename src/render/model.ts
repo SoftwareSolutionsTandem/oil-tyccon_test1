@@ -78,8 +78,11 @@ export function shade(m: Material, n: V3, ao = 1): string {
 
 /** Фигура тени на земле в координатах клеток относительно начала клетки объекта. */
 export type ShadowShape =
-  | { kind: 'poly'; pts: Array<[number, number]> }
-  | { kind: 'line'; a: [number, number]; b: [number, number]; w: number };
+  | { kind: 'poly'; pts: Array<[number, number]>; contact?: boolean }
+  | { kind: 'line'; a: [number, number]; b: [number, number]; w: number; contact?: boolean };
+
+/** Высота, ниже которой деталь считается стоящей на земле (даёт контактную тень). */
+const GROUND_EPS = 0.02;
 
 function hull(points: Array<[number, number]>): Array<[number, number]> {
   const p = [...points].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
@@ -159,7 +162,8 @@ export class ModelPainter {
     if (dot(n, VIEW) <= 1e-4) return;
     if (!this.ctx || zBottom > 0.02) return this.face(points, m, n);
     const top = Math.max(...points.map((p) => p[2]));
-    const [, y0] = proj([points[0][0], points[0][1], 0]);
+    const low = points.reduce((a, b) => (b[2] < a[2] ? b : a));
+    const [, y0] = proj([low[0], low[1], 0]);
     const g = this.ctx.createLinearGradient(0, y0, 0, y0 - Math.min(0.25, top) * ZPX);
     g.addColorStop(0, shade(m, n, 0.62));
     g.addColorStop(1, shade(m, n, 1));
@@ -169,6 +173,25 @@ export class ModelPainter {
   shadowPoly(points: V3[]): void {
     if (!this.castShadows) return;
     this.shadows.push({ kind: 'poly', pts: hull(points.map(groundShadow)) });
+  }
+
+  /** Контактная тень: плотное затемнение под основанием, которое «сажает» объект на землю. */
+  contactPoly(points: Array<[number, number]>, grow = 0.03): void {
+    if (!this.castShadows || points.length < 3) return;
+    const cx = points.reduce((sum, p) => sum + p[0], 0) / points.length;
+    const cy = points.reduce((sum, p) => sum + p[1], 0) / points.length;
+    const pts = hull(points).map(([x, y]) => {
+      const dx = x - cx;
+      const dy = y - cy;
+      const l = Math.hypot(dx, dy) || 1;
+      return [x + (dx / l) * grow, y + (dy / l) * grow] as [number, number];
+    });
+    this.shadows.push({ kind: 'poly', pts, contact: true });
+  }
+
+  contactCircle(x: number, y: number, r: number): void {
+    if (!this.castShadows) return;
+    this.shadows.push({ kind: 'line', a: [x, y], b: [x, y], w: r * 2, contact: true });
   }
 
   shadowLine(a: V3, b: V3, w: number): void {
@@ -200,6 +223,7 @@ export class ModelPainter {
       for (const x of [x0, x1]) for (const y of [y0, y1]) for (const z of [z0, z1]) pts.push([x, y, z]);
       this.shadowPoly(pts);
     }
+    if (z0 < GROUND_EPS) this.contactPoly([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]);
   }
 
   /** Произвольно ориентированный параллелепипед: центр и три полуоси. */
@@ -217,10 +241,16 @@ export class ModelPainter {
         faces.push([n, [add(add(center, mul(u, -1)), mul(v, -1)), add(add(center, u), mul(v, -1)), add(add(center, u), v), add(add(center, mul(u, -1)), v)]]);
       }
     }
-    for (const [n, pts] of faces) this.face(pts, m, n);
+    for (const [n, pts] of faces) {
+      const zMin = Math.min(...pts.map((q) => q[2]));
+      if (Math.abs(n[2]) < 0.2 && zMin < GROUND_EPS) this.aoFace(pts, m, n, zMin);
+      else this.face(pts, m, n);
+    }
     const all: V3[] = [];
     for (const i of [-1, 1]) for (const j of [-1, 1]) for (const k of [-1, 1]) all.push(corner(i, j, k));
     if (Math.max(...all.map((p) => p[2])) > 0.005) this.shadowPoly(all);
+    const base = all.filter((q) => q[2] < GROUND_EPS);
+    if (base.length >= 3) this.contactPoly(base.map((q) => [q[0], q[1]] as [number, number]));
   }
 
   /** Вертикальный цилиндр с плавным освещением и бликом. */
@@ -236,6 +266,7 @@ export class ModelPainter {
     this.maxY = Math.max(this.maxY, by + ry);
     this.minY = Math.min(this.minY, tyy - ry);
     if (h > 0.005) this.shadowLine([cx, cy, z0], [cx, cy, z0 + h], r * 2);
+    if (z0 < GROUND_EPS) this.contactCircle(cx, cy, r + 0.03);
     if (!this.ctx) return;
     const ctx = this.ctx;
     const g = ctx.createLinearGradient(bx - rx, 0, bx + rx, 0);
@@ -305,6 +336,7 @@ export class ModelPainter {
       this.face(pts, m, n, 0.92);
     }
     if (Math.max(a[2], b[2]) > 0.005) this.shadowLine(a, b, r * 2);
+    for (const end of [a, b]) if (end[2] < GROUND_EPS) this.contactCircle(end[0], end[1], r + 0.02);
   }
 
   /**
@@ -320,6 +352,7 @@ export class ModelPainter {
     this.minY = Math.min(this.minY, y - R * squash);
     this.maxY = Math.max(this.maxY, y + R * squash);
     if (c[2] > 0) this.shadows.push({ kind: 'line', a: groundShadow(c), b: groundShadow(c), w: r * 2 });
+    if (c[2] - r * squash < 0.06) this.contactCircle(c[0], c[1], r * 0.85);
     if (!this.ctx) return;
     const ctx = this.ctx;
     ctx.save();

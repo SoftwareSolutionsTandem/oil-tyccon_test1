@@ -503,6 +503,11 @@ export class Renderer {
         this.drawStatusBadge(b);
       },
       shadows: () => {
+        if (b.type === 'pumpjack') {
+          // Тень кадра анимации: те же примитивы и кинематика, что и у модели.
+          this.castShadow(this.sprites.pumpjack(b.level, this.pumpPhase.get(b.id) ?? hash2(b.x, b.y, 1) * 6).shadows, b.x, b.y);
+          return;
+        }
         const truck = b.type === 'terminal' ? this.truckOffset(b) : null;
         if (truck && truck.dx > 0) this.castShadow(this.sprites.truck().shadows, b.x + truck.dx, b.y);
       },
@@ -512,7 +517,7 @@ export class Renderer {
   /** Спрайты здания для статичной тени, запекаемой в землю. */
   private buildingSprites(b: Building): Array<{ sprite: Sprite; dx: number }> {
     const lib = this.sprites;
-    if (b.type === 'pumpjack') return [{ sprite: lib.pumpjack(b.level, Math.PI / 2), dx: 0 }];
+    if (b.type === 'pumpjack') return []; // тень качалки динамическая, см. buildingItem
     if (b.type === 'tank') return [{ sprite: lib.tank(b.level), dx: 0 }];
     if (b.type === 'hq') return [{ sprite: lib.headquarters(), dx: 0 }];
     const parts = [
@@ -621,7 +626,7 @@ export class Renderer {
     this.ctx.drawImage(baked.canvas, isoX(x, y) + baked.ox, isoY(x, y) + baked.oy, baked.w, baked.h);
   }
 
-  /** Тени движущихся объектов (бензовозы) рисуются прямо поверх земли; статичные запечены в землю. */
+  /** Тени движущихся объектов (качалки, бензовозы) рисуются прямо поверх земли; статичные запечены в землю. */
   private drawShadows(items: DrawItem[]): void {
     this.ctx.save();
     this.ctx.globalAlpha = SHADOW_ALPHA;
@@ -728,6 +733,7 @@ interface ShadowSprite {
 }
 
 const SHADOW_SCALE = 1;
+const CAST_SHADOW_DENSITY = 0.72;
 const SHADOW_BLUR = 1.6;
 
 /** Рисует фигуры тени (в клетках) в маленький холст в пикселях мира и размывает края. */
@@ -745,7 +751,7 @@ function bakeShadow(shapes: ShadowShape[]): ShadowSprite {
     maxY = Math.max(maxY, y + r * 23);
   };
   for (const sh of shapes) {
-    if (sh.kind === 'poly') sh.pts.forEach(([u, v]) => grow(u, v, 0));
+    if (sh.kind === 'poly') sh.pts.forEach(([u, v]) => grow(u, v, 0.04));
     else {
       grow(sh.a[0], sh.a[1], sh.w / 2);
       grow(sh.b[0], sh.b[1], sh.w / 2);
@@ -764,7 +770,10 @@ function bakeShadow(shapes: ShadowShape[]): ShadowSprite {
   ctx.fillStyle = '#1a1612';
   ctx.strokeStyle = '#1a1612';
   ctx.lineCap = 'round';
-  for (const sh of shapes) {
+  // Падающая тень полупрозрачная, контактная — плотная: у основания объект темнее, тень дальше светлее.
+  const ordered = [...shapes.filter((sh) => !sh.contact), ...shapes.filter((sh) => sh.contact)];
+  for (const sh of ordered) {
+    ctx.globalAlpha = sh.contact ? 1 : CAST_SHADOW_DENSITY;
     if (sh.kind === 'poly') {
       ctx.beginPath();
       sh.pts.forEach(([px, py], i) => (i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py)));
