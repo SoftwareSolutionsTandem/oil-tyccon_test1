@@ -76,10 +76,16 @@ export class GroundDecals {
 
   drawRoads(ctx: CanvasRenderingContext2D, s: GameState): void {
     this.updateRoutes(s);
+    this.strokeRoads(ctx, this.roads);
+  }
+
+  /** Гравийная дорога по ломаным (в клетках): обочина, полотно, колеи. Общая для карты и окружения. */
+  strokeRoads(ctx: CanvasRenderingContext2D, roads: Array<Array<[number, number]>>, width = 1): void {
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
-    const stroke = (style: string | CanvasPattern, w: number) => {
-      for (const road of this.roads) {
+    const stroke = (style: string | CanvasPattern, w0: number) => {
+      const w = w0 * width;
+      for (const road of roads) {
         ctx.beginPath();
         road.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
         ctx.strokeStyle = style;

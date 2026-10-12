@@ -443,8 +443,15 @@ export interface Sprite {
   shadows: ShadowShape[];
 }
 
-/** Запекает модель в спрайт: измерение → холст по размеру → отрисовка → наложение текстуры загрязнения. */
-export function bakeSprite(draw: (p: ModelPainter) => void, grime?: { texture: HTMLCanvasElement; strength: number }): Sprite {
+/**
+ * Запекает модель в спрайт: измерение → холст по размеру → отрисовка → наложение текстуры загрязнения.
+ * scale — пикселей спрайта на пиксель мира (дальние ориентиры пекутся грубее).
+ */
+export function bakeSprite(
+  draw: (p: ModelPainter) => void,
+  grime?: { texture: HTMLCanvasElement; strength: number },
+  scale = SPRITE_SCALE,
+): Sprite {
   const measure = new ModelPainter(null);
   draw(measure);
   const pad = 2;
@@ -452,9 +459,9 @@ export function bakeSprite(draw: (p: ModelPainter) => void, grime?: { texture: H
   const oy = Math.floor(measure.minY - pad);
   const w = Math.ceil(measure.maxX + pad) - ox;
   const h = Math.ceil(measure.maxY + pad) - oy;
-  const canvas = createCanvas(w * SPRITE_SCALE, h * SPRITE_SCALE);
+  const canvas = createCanvas(w * scale, h * scale);
   const ctx = canvas.getContext('2d')!;
-  ctx.setTransform(SPRITE_SCALE, 0, 0, SPRITE_SCALE, -ox * SPRITE_SCALE, -oy * SPRITE_SCALE);
+  ctx.setTransform(scale, 0, 0, scale, -ox * scale, -oy * scale);
   const painter = new ModelPainter(ctx);
   draw(painter);
   if (grime) applyGrime(canvas, grime.texture, grime.strength);

@@ -43,10 +43,14 @@ export function smoothstep(a: number, b: number, v: number): number {
   return t * t * (3 - 2 * t);
 }
 
+/** Холст; в Web Worker (где нет document) — OffscreenCanvas с тем же 2D-интерфейсом. */
 export function createCanvas(w: number, h: number): HTMLCanvasElement {
+  const width = Math.max(1, Math.ceil(w));
+  const height = Math.max(1, Math.ceil(h));
+  if (typeof document === 'undefined') return new OffscreenCanvas(width, height) as unknown as HTMLCanvasElement;
   const c = document.createElement('canvas');
-  c.width = Math.max(1, Math.ceil(w));
-  c.height = Math.max(1, Math.ceil(h));
+  c.width = width;
+  c.height = height;
   return c;
 }
 

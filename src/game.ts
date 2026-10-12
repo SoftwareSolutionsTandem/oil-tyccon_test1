@@ -15,6 +15,8 @@ export class Game {
   mode: BuildableType | null = null;
   selection: Selection = null;
   hover: { x: number; y: number } | null = null;
+  /** Курсор над окружением за границей игровой карты. */
+  hoverOutside = false;
   onToast: (text: string, kind: ToastKind) => void = () => {};
 
   constructor(

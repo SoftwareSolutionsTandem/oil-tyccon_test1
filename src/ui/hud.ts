@@ -376,7 +376,9 @@ export class Hud {
     const g = this.game;
     const s = this.s;
     let text = '';
-    if (g.mode) {
+    if (g.hoverOutside) {
+      text = 'За границей лицензионной территории: эта земля не продаётся и не застраивается';
+    } else if (g.mode) {
       const name = core.BUILDINGS[g.mode].name;
       let reason = '';
       if (g.hover) {

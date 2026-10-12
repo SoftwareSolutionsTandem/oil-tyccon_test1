@@ -110,7 +110,9 @@ canvas.addEventListener('pointerdown', (e) => {
 
 canvas.addEventListener('pointermove', (e) => {
   const tile = tileAtScreen(e.clientX, e.clientY);
-  game.hover = core.inBounds(game.state, tile.x, tile.y) ? tile : null;
+  const inside = core.inBounds(game.state, tile.x, tile.y);
+  game.hover = inside ? tile : null;
+  game.hoverOutside = !inside;
   if (!drag) return;
   const dx = e.clientX - drag.x;
   const dy = e.clientY - drag.y;
@@ -135,7 +137,10 @@ canvas.addEventListener('pointerup', (e) => {
   drag = null;
 });
 
-canvas.addEventListener('pointerleave', () => (game.hover = null));
+canvas.addEventListener('pointerleave', () => {
+  game.hover = null;
+  game.hoverOutside = false;
+});
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener(
   'wheel',

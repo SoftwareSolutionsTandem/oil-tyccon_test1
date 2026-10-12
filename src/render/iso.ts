@@ -38,6 +38,14 @@ export class Camera {
     this.y += before.y - after.y;
   }
 
+  /** Держит центр камеры над игровой картой с небольшим запасом: за пределами — только окружение, улететь в пустоту нельзя. */
+  clampToTiles(min: number, max: number): void {
+    const t = worldToTile(this.x, this.y);
+    const x = Math.min(max, Math.max(min, t.x));
+    const y = Math.min(max, Math.max(min, t.y));
+    if (x !== t.x || y !== t.y) this.centerOnTile(x, y);
+  }
+
   centerOnTile(x: number, y: number): void {
     this.x = isoX(x, y);
     this.y = isoY(x, y);

@@ -41,9 +41,10 @@ export class TerrainLayer {
 
   private makeTracks(): Track[] {
     const out: Track[] = [];
-    for (let i = 0; i < 9; i++) {
-      let x = hash2(i, 1, this.seed) * this.size;
-      let y = hash2(i, 2, this.seed) * this.size;
+    // Колеи по всей видимой территории, а не только по игровой карте: степь вокруг тоже изъезжена.
+    for (let i = 0; i < 26; i++) {
+      let x = -24 + hash2(i, 1, this.seed) * (this.size + 48);
+      let y = -24 + hash2(i, 2, this.seed) * (this.size + 48);
       let a = hash2(i, 3, this.seed) * Math.PI * 2;
       const pts: Array<[number, number]> = [[x, y]];
       for (let k = 0; k < 40; k++) {
@@ -65,6 +66,16 @@ export class TerrainLayer {
       height: fbm(u * 0.45, v * 0.45, 3, s + 2),
       moist: fbm(u * 0.2, v * 0.2, 2, s + 3),
     };
+  }
+
+  /** Цвет грунта и высота рельефа в точке мира — общая основа для карты, степи и дальней панорамы. */
+  sample(u: number, v: number): { color: RGBf; height: number } {
+    const f = this.fields(u, v);
+    const grass = smoothstep(0.42, 0.62, f.biome + (f.patch - 0.5) * 0.35);
+    let c = mix(DIRT, mix(DRY, GREEN, smoothstep(0.42, 0.68, f.moist)), grass);
+    c = mix(c, SAND, smoothstep(0.6, 0.74, f.patch) * (1 - grass * 0.7));
+    c = mix(c, DARK, smoothstep(0.62, 0.8, f.moist) * (1 - grass) * 0.4);
+    return { color: c, height: f.height };
   }
 
   grassAt(u: number, v: number): number {
@@ -90,7 +101,9 @@ export class TerrainLayer {
     const existing = this.chunks.get(key);
     if (existing) return { canvas: existing, pad: PAD_TILES };
     const PAD = Math.round(PAD_TILES * tex);
-    const STEP = Math.max(2, Math.round(tex / 16));
+    // Шаг сетки полей в клетках: 1/16 на карте; в степи (низкое разрешение) хватает 1/8 — вчетверо меньше вычислений.
+    const lod = tex < 48;
+    const STEP = Math.max(2, Math.round(tex / (lod ? 8 : 16)));
     const TEX = tex;
     const size = cell * TEX + PAD * 2;
     const canvas = createCanvas(size, size);
@@ -106,13 +119,9 @@ export class TerrainLayer {
       for (let gx = 0; gx < gw; gx++) {
         const u = u0 + (gx * STEP) / TEX;
         const v = v0 + (gy * STEP) / TEX;
-        const f = this.fields(u, v);
-        const grass = smoothstep(0.42, 0.62, f.biome + (f.patch - 0.5) * 0.35);
-        let c = mix(DIRT, mix(DRY, GREEN, smoothstep(0.42, 0.68, f.moist)), grass);
-        c = mix(c, SAND, smoothstep(0.6, 0.74, f.patch) * (1 - grass * 0.7));
-        c = mix(c, DARK, smoothstep(0.62, 0.8, f.moist) * (1 - grass) * 0.4);
-        fBase[gy * gw + gx] = c;
-        fHeight[gy * gw + gx] = f.height;
+        const g = this.sample(u, v);
+        fBase[gy * gw + gx] = g.color;
+        fHeight[gy * gw + gx] = g.height;
       }
     }
 
@@ -198,14 +207,14 @@ export class TerrainLayer {
     }
     for (let ty = y0 - 1; ty < y0 + cell + 1; ty++) {
       for (let tx = x0 - 1; tx < x0 + cell + 1; tx++) {
-        this.tileDetails(ctx, tx, ty);
+        this.tileDetails(ctx, tx, ty, lod);
       }
     }
     this.chunks.set(key, canvas);
     return { canvas, pad: PAD_TILES };
   }
 
-  private tileDetails(ctx: CanvasRenderingContext2D, tx: number, ty: number): void {
+  private tileDetails(ctx: CanvasRenderingContext2D, tx: number, ty: number, lod = false): void {
     const s = this.seed;
     const h = (i: number) => hash2(tx * 31 + i, ty * 17 + i * 7, s + 11);
     const grass = this.grassAt(tx + 0.5, ty + 0.5);
@@ -231,7 +240,8 @@ export class TerrainLayer {
     for (let i = 0; i < tufts; i++) {
       const cx = tx + h(20 + i);
       const cy = ty + h(40 + i);
-      const g = this.grassAt(cx, cy);
+      // В упрощённом режиме — одна проверка травы на клетку вместо проверки каждого пучка.
+      const g = lod ? grass : this.grassAt(cx, cy);
       if (g < 0.25) continue;
       const tone = h(60 + i);
       ctx.strokeStyle = tone < 0.5 ? 'rgba(70,86,40,0.55)' : 'rgba(176,170,104,0.5)';

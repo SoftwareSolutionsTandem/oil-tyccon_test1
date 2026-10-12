@@ -8,14 +8,17 @@ import {
   type Building,
   type GameState,
 } from '../core';
+import { Environment, HAZE_CSS } from './environment';
 import { GroundDecals } from './ground';
-import { Camera, isoX, isoY } from './iso';
-import { proj, SPRITE_SCALE, ZPX, type ShadowShape, type Sprite } from './model';
+import { Camera, isoX, isoY, worldToTile } from './iso';
+import { proj, type ShadowShape, type Sprite } from './model';
+import { mipmap, mipmapBytes, mipmapFrame } from './mipmap';
 import { HQ_FLAG_TOP, HQ_WINDOWS, LIGHTS, pumpExhaust, tankDims, tankGauge, TRUCK_DUST, TRUCK_EXHAUST, TRUCK_LENGTH } from './models';
 import { ParticleSystem } from './particles';
 import { createCanvas, hash2 } from './noise';
 import { SpriteLibrary } from './sprites';
 import { makeStains, TerrainLayer, TEX_HIGH, TEX_LOW } from './terrain';
+import { TerrainSource } from './terrainSource';
 import { lightingAt, NOON, type Lighting } from './daylight';
 
 export interface ViewState {
@@ -78,6 +81,10 @@ export class Renderer {
   readonly ctx: CanvasRenderingContext2D;
   private sprites = new SpriteLibrary();
   private terrain: TerrainLayer | null = null;
+  private env: Environment | null = null;
+  private source: TerrainSource | null = null;
+  /** Первый кадр после загрузки: видимую землю генерируем сразу, без заглушек. */
+  private firstFrame = true;
   private decals: GroundDecals;
   private stains = makeStains(5, 17);
   private shadowSprites = new WeakMap<ShadowShape[], ShadowSprite>();
@@ -103,6 +110,7 @@ export class Renderer {
   private pendingBadges: Building[] = [];
   private glowWarm = makeGlow([255, 214, 150]);
   private glowRed = makeGlow([255, 70, 50]);
+  private glowFlame = makeGlow([255, 150, 50]);
   /** Сглаженная длительность реального кадра — по ней снижается интенсивность частиц на слабых устройствах. */
   private avgFrame = 1 / 60;
   /** Время отрисовки последнего кадра, мс (для отладки производительности). */
@@ -133,7 +141,11 @@ export class Renderer {
   adopt(s: GameState): void {
     if (!this.terrain || this.terrain.seed !== s.seed) {
       this.terrain = new TerrainLayer(s.seed, s.map.size);
+      this.source?.dispose();
+      this.source = new TerrainSource(s.seed, s.map.size);
       this.groundCache.clear();
+      this.env = new Environment(s, this.terrain, this.source, this.sprites, this.decals);
+      this.firstFrame = true;
     }
     for (const b of s.buildings) this.bornAt.set(b.id, -Infinity);
     this.pumpPhase.clear();
@@ -148,10 +160,12 @@ export class Renderer {
       return Math.round((bytes / 1048576) * 10) / 10;
     };
     const stats: Record<string, number> = {
-      terrainSource: mb(this.terrain?.canvases() ?? []),
+      terrainSource: Math.round(((this.source?.bytes() ?? 0) / 1048576) * 10) / 10,
       groundChunks: mb([...this.groundCache.values()].map((e) => e.canvas)),
       sprites: mb(this.sprites.canvases()),
       groundShadows: mb([...this.groundCache.values()].flatMap((e) => (e.shadow ? [e.shadow.canvas] : []))),
+      environment: mb(this.env?.canvases() ?? []),
+      mipmaps: Math.round((mipmapBytes() / 1048576) * 10) / 10,
       frame: mb([this.canvas]),
     };
     stats.total = Math.round(Object.values(stats).reduce((a, b) => a + b, 0) * 10) / 10;
@@ -178,23 +192,33 @@ export class Renderer {
     if (!this.terrain || this.terrain.seed !== s.seed) this.adopt(s);
     const simDt = dt * speed;
     const { ctx } = this;
+    mipmapFrame();
     this.updateGroundCache(s);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    const bg = ctx.createLinearGradient(0, 0, 0, this.canvas.height);
-    bg.addColorStop(0, '#1a2430');
-    bg.addColorStop(1, '#2a3540');
-    ctx.fillStyle = bg;
+    // Фон — цвет дымки: дальняя текстура растворяется в нём без видимой границы.
+    ctx.fillStyle = HAZE_CSS;
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    // Камера не уходит дальше нескольких клеток за край карты.
+    this.camera.clampToTiles(-8, s.map.size + 8);
 
     const light = this.dayNight ? lightingAt(s.time) : NOON;
     this.lighting = light;
     this.applyCamera(ctx);
-    this.drawSlab(s);
+    const vr = this.viewRect();
+    const ratio = this.camera.zoom * this.dpr;
+    // Если весь экран над картой (приближение), окружение не видно — не тратим на него время.
+    if (!this.viewInsideMap(s)) {
+      this.env!.drawFar(ctx);
+      this.env!.drawMid(ctx, vr, ratio, mipmap);
+      this.env!.drawLandmarks(ctx, vr, ratio, mipmap);
+    }
     this.drawGround(s, view, light);
 
     this.avgFrame += (dt - this.avgFrame) * 0.05;
     // Медленнее 30 и 20 кадров/с — испускаем меньше частиц.
-    this.particles.quality = this.avgFrame > 0.05 ? 0.35 : this.avgFrame > 0.034 ? 0.6 : 1;
+    // При сильном отдалении частицы почти не видны — плавно перестаём их испускать.
+    const zoomFade = Math.min(1, Math.max(0, (this.camera.zoom - 0.4) / 0.35));
+    this.particles.quality = (this.avgFrame > 0.05 ? 0.35 : this.avgFrame > 0.034 ? 0.6 : 1) * zoomFade;
     for (const b of s.buildings) {
       if (!this.bornAt.has(b.id)) this.bornAt.set(b.id, this.clock);
       if (b.type === 'terminal' || b.type === 'hq') this.exitDirs.set(b.id, this.exitDir(s, b));
@@ -208,12 +232,24 @@ export class Renderer {
     items.sort((a, b) => a.order - b.order);
     for (const it of items) it.draw();
     this.particles.draw(ctx, 1); // дым и выхлоп поднимаются над объектами
+    this.drawFlare(light);
     this.drawNight(s, light);
     for (const b of this.pendingBadges) this.drawStatusBadge(b);
     this.pendingBadges = [];
 
     this.drawFloats(dt);
     this.frameMs = performance.now() - t0;
+  }
+
+  private viewInsideMap(s: GameState): boolean {
+    const n = s.map.size;
+    const { w, h } = this.size;
+    for (const [sx, sy] of [[0, 0], [w, 0], [0, h], [w, h]]) {
+      const p = this.camera.screenToWorld(sx, sy, w, h);
+      const t = worldToTile(p.x, p.y);
+      if (t.x < 0 || t.y < 0 || t.x > n || t.y > n) return false;
+    }
+    return true;
   }
 
   private applyCamera(ctx: CanvasRenderingContext2D, k = 1): void {
@@ -234,32 +270,6 @@ export class Renderer {
     return sx > r.x0 && sx < r.x1 && sy > r.y0 && sy < r.y1;
   }
 
-  /** Срез грунта по краям карты — мир выглядит как макет, а не как плоская картинка. */
-  private drawSlab(s: GameState): void {
-    const { ctx } = this;
-    const n = s.map.size;
-    const depth = 1.1 * ZPX;
-    const side = (a: [number, number], b: [number, number], light: number) => {
-      const [ax, ay] = proj([a[0], a[1], 0]);
-      const [bx, by] = proj([b[0], b[1], 0]);
-      const g = ctx.createLinearGradient(0, Math.min(ay, by), 0, Math.max(ay, by) + depth);
-      g.addColorStop(0, `rgb(${92 * light},${72 * light},${50 * light})`);
-      g.addColorStop(0.25, `rgb(${120 * light},${84 * light},${56 * light})`);
-      g.addColorStop(0.6, `rgb(${104 * light},${92 * light},${80 * light})`);
-      g.addColorStop(1, `rgb(${62 * light},${60 * light},${58 * light})`);
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.moveTo(ax, ay);
-      ctx.lineTo(bx, by);
-      ctx.lineTo(bx, by + depth);
-      ctx.lineTo(ax, ay + depth);
-      ctx.closePath();
-      ctx.fill();
-    };
-    side([0, n], [n, n], 0.95);
-    side([n, 0], [n, n], 0.62);
-  }
-
   /**
    * Земля: запечённые в проекции ячейки 4×4 клетки, затем слой статичных теней с силой по времени суток.
    * Устаревшая ячейка показывается, пока не перепечена (не больше одной за кадр).
@@ -275,8 +285,18 @@ export class Renderer {
         const g = cellGeometry(cx * CELL, cy * CELL);
         if (g.ox > r.x1 || g.ox + g.w < r.x0 || g.oy > r.y1 || g.oy + g.h < r.y0) continue;
         const cell = this.groundCache.get(cy * cells + cx);
-        if (!cell) continue;
-        ctx.drawImage(cell.canvas, g.ox, g.oy, g.w, g.h);
+        if (!cell) {
+          // Заглушка до запекания: ромб усреднённого цвета грунта вместо дыры.
+          ctx.fillStyle = '#8e8466';
+          ctx.beginPath();
+          ctx.moveTo(isoX(cx * CELL, cy * CELL), isoY(cx * CELL, cy * CELL));
+          ctx.lineTo(isoX((cx + 1) * CELL, cy * CELL), isoY((cx + 1) * CELL, cy * CELL));
+          ctx.lineTo(isoX((cx + 1) * CELL, (cy + 1) * CELL), isoY((cx + 1) * CELL, (cy + 1) * CELL));
+          ctx.lineTo(isoX(cx * CELL, (cy + 1) * CELL), isoY(cx * CELL, (cy + 1) * CELL));
+          ctx.fill();
+          continue;
+        }
+        ctx.drawImage(mipmap(cell.canvas, (this.camera.zoom * this.dpr * g.w) / cell.canvas.width), g.ox, g.oy, g.w, g.h);
         visible.push(cell);
       }
     }
@@ -334,19 +354,43 @@ export class Renderer {
     const r = this.viewRect();
     const cells = s.map.size / CELL;
     let rebaked = 0;
+    let created = 0;
+    const t0 = performance.now();
     for (let cy = 0; cy < cells; cy++) {
       for (let cx = 0; cx < cells; cx++) {
         const g = cellGeometry(cx * CELL, cy * CELL);
         if (g.ox > r.x1 || g.ox + g.w < r.x0 || g.oy > r.y1 || g.oy + g.h < r.y0) continue;
         const id = cy * cells + cx;
         const cell = this.groundCache.get(id);
-        if (cell && rebaked >= 1) continue;
+        if (!this.firstFrame && (cell ? rebaked >= 1 : created >= 2)) continue; // недостающие видимые — до двух за кадр
         const key = this.cellKey(s, cx * CELL, cy * CELL);
         if (cell && cell.key === key) continue;
-        this.groundCache.set(id, this.bakeCell(s, cx * CELL, cy * CELL, key));
+        const baked = this.bakeCell(s, cx * CELL, cy * CELL, key);
+        if (!baked) continue; // текстура ещё в работе — остаётся прежняя ячейка или заглушка
+        this.groundCache.set(id, baked);
         if (cell) rebaked++;
+        else created++;
       }
     }
+    // Спокойный кадр: заранее готовим то, что понадобится при перемещении и отдалении камеры —
+    // невидимые ячейки карты, дальнюю текстуру и степь. Не больше одной единицы работы за кадр.
+    if (rebaked + created === 0 && this.clock > 0.5) {
+      let requested = 0;
+      for (let id = 0; id < cells * cells && requested < 4; id++) {
+        if (this.groundCache.has(id)) continue;
+        const x0 = (id % cells) * CELL;
+        const y0 = Math.floor(id / cells) * CELL;
+        const baked = this.bakeCell(s, x0, y0, this.cellKey(s, x0, y0));
+        if (baked) {
+          this.groundCache.set(id, baked);
+          this.firstFrame = false;
+          return;
+        }
+        requested++; // запрос текстуры ушёл в фоновый поток
+      }
+      if (requested === 0) this.env?.prebake(Math.max(2, 8 - (performance.now() - t0)));
+    }
+    this.firstFrame = false;
   }
 
   /** Ключ содержимого ячейки: качество, владение, уровни пятен, здания рядом и проходящие трассы. */
@@ -376,11 +420,14 @@ export class Renderer {
    * отдельно — слой статичных теней. Ячейки перекрываются с одинаковым содержимым, поэтому швов нет.
    * Своя земля — в повышенном разрешении; у чужой исходная текстура освобождается сразу после запекания.
    */
-  private bakeCell(s: GameState, x0: number, y0: number, key: string): GroundCell {
+  private bakeCell(s: GameState, x0: number, y0: number, key: string): GroundCell | null {
     const n = s.map.size;
     const owned = isParcelOwned(s, Math.floor(x0 / PARCEL_SIZE), Math.floor(y0 / PARCEL_SIZE));
     const scale = owned ? GROUND_SCALE_HIGH : GROUND_SCALE_LOW;
     const tex = owned ? TEX_HIGH : TEX_LOW;
+    // Исходная текстура готовится в фоновом потоке; пока её нет, ячейку не трогаем.
+    const terrain = this.source!.get(x0, y0, CELL, tex, this.firstFrame);
+    if (!terrain) return null;
     const g = cellGeometry(x0, y0);
     const cw = Math.ceil(g.w * scale);
     const ch = Math.ceil(g.h * scale);
@@ -393,10 +440,9 @@ export class Renderer {
     ctx.rect(Math.max(0, x0 - e), Math.max(0, y0 - e), Math.min(n, x0 + CELL + e) - Math.max(0, x0 - e), Math.min(n, y0 + CELL + e) - Math.max(0, y0 - e));
     ctx.clip();
 
-    const terrain = this.terrain!.bake(x0, y0, CELL, tex);
-    ctx.drawImage(terrain.canvas, x0 - terrain.pad, y0 - terrain.pad, CELL + terrain.pad * 2, CELL + terrain.pad * 2);
+    ctx.drawImage(terrain.image, x0 - terrain.pad, y0 - terrain.pad, CELL + terrain.pad * 2, CELL + terrain.pad * 2);
     // Исходник нужен только там, где земля может меняться: своя и соседняя с ней (площадки, трубы, тени у границы).
-    if (!owned && !this.nearOwned(s, x0, y0)) this.terrain!.release(x0, y0, CELL, tex);
+    if (!owned && !this.nearOwned(s, x0, y0)) this.source!.release(x0, y0, CELL, tex);
 
     for (let y = y0 - 1; y < y0 + CELL + 1; y++) {
       for (let x = x0 - 1; x < x0 + CELL + 1; x++) {
@@ -511,6 +557,19 @@ export class Renderer {
       }
       ctx.stroke();
     };
+    // Граница лицензионной территории: всё, что за ней, — окружение, его нельзя купить.
+    const n = s.map.size;
+    ctx.beginPath();
+    ctx.moveTo(isoX(0, 0), isoY(0, 0));
+    ctx.lineTo(isoX(n, 0), isoY(n, 0));
+    ctx.lineTo(isoX(n, n), isoY(n, n));
+    ctx.lineTo(isoX(0, n), isoY(0, n));
+    ctx.closePath();
+    ctx.setLineDash([10, 7]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.32)';
+    ctx.lineWidth = 1.4 / Math.max(0.5, this.camera.zoom);
+    ctx.stroke();
+    ctx.setLineDash([]);
     ctx.lineCap = 'round';
     strokeSegs('rgba(0,0,0,0.25)', 3.5);
     strokeSegs('rgba(255,232,160,0.75)', 1.5);
@@ -705,7 +764,8 @@ export class Renderer {
 
   /** Рисует спрайт так, чтобы начало его модели совпало с углом клетки (x, y). */
   private blit(sp: Sprite, x: number, y: number): void {
-    this.ctx.drawImage(sp.canvas, isoX(x, y) + sp.ox, isoY(x, y) + sp.oy, sp.canvas.width / SPRITE_SCALE, sp.canvas.height / SPRITE_SCALE);
+    const ratio = (this.camera.zoom * this.dpr * sp.w) / sp.canvas.width;
+    this.ctx.drawImage(mipmap(sp.canvas, ratio), isoX(x, y) + sp.ox, isoY(x, y) + sp.oy, sp.w, sp.h);
   }
 
   private animate(b: Building, simDt: number): void {
@@ -789,6 +849,22 @@ export class Renderer {
     this.ctx.globalAlpha = SHADOW_ALPHA * light.shadow;
     for (const it of items) it.shadows?.();
     this.ctx.restore();
+  }
+
+  /** Пламя факела на горизонте: днём видно слабо, ночью — яркая точка в дымке. */
+  private drawFlare(light: Lighting): void {
+    if (!this.env) return;
+    const { ctx } = this;
+    const haze = this.env.flareHaze();
+    for (const p of this.env.flarePoints()) {
+      const [x, y] = proj(p);
+      const flicker = 0.8 + 0.2 * Math.sin(this.clock * 13) * Math.sin(this.clock * 7.3);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = (1 - haze * 0.7) * (0.35 + 0.65 * light.night) * flicker;
+      ctx.drawImage(this.glowFlame, x - 9, y - 16, 18, 22);
+      ctx.restore();
+    }
   }
 
   // ——— Время суток ———
