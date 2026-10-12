@@ -2,17 +2,64 @@ import { HQ_POS, type Building, type GameState } from '../core';
 import { makeGroundMaterial, TEX_PATTERN } from './terrain';
 
 const R2 = Math.SQRT1_2;
+/** Устье скважины относительно угла клетки качалки (выкидная линия выходит назад-влево). */
+const WELLHEAD: [number, number] = [0.5 + (-0.5 - 0.27) * R2, 0.5 + (-0.27 + 0.5) * R2];
+const SIDES: ReadonlyArray<readonly [number, number]> = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+];
+
+/** Кратчайший путь по клеткам без зданий (кроме начала) от from к goal; null — пути нет. */
+function roadPath(n: number, blocked: Uint8Array, from: number, goal: number): number[] | null {
+  const prev = new Int32Array(n * n).fill(-2);
+  prev[from] = -1;
+  const queue = [from];
+  for (let q = 0; q < queue.length; q++) {
+    const i = queue[q];
+    if (i === goal) {
+      const out: number[] = [];
+      for (let t = i; t >= 0; t = prev[t]) out.push(t);
+      return out.reverse();
+    }
+    const x = i % n;
+    const y = (i - x) / n;
+    for (const [dx, dy] of SIDES) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+      const j = ny * n + nx;
+      if (prev[j] !== -2 || (blocked[j] && j !== goal)) continue;
+      prev[j] = i;
+      queue.push(j);
+    }
+  }
+  return null;
+}
+
+/** Убирает промежуточные точки на прямых участках ломаной. */
+function simplify(pts: Array<[number, number]>): Array<[number, number]> {
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [ax, ay] = out[out.length - 1];
+    const [bx, by] = pts[i];
+    const [cx, cy] = pts[i + 1];
+    if (Math.abs((bx - ax) * (cy - by) - (by - ay) * (cx - bx)) > 1e-6) out.push(pts[i]);
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+}
 
 /**
- * Наземная инфраструктура, выводимая из состояния игры: площадки под зданиями, трубопроводы
- * от скважин к хранилищам и подъездные дороги. Чисто визуальный слой — на правила не влияет.
+ * Наземная инфраструктура: площадки под зданиями, трубопроводы (из состояния карты — это действующая сеть)
+ * и подъездные дороги (выводятся из расположения зданий, чисто визуальные — на правила не влияют).
  * Все функции рисуют в координатах клеток (контекст уже в проекции земли).
  */
 export class GroundDecals {
   private gravel: CanvasPattern;
   private concrete: CanvasPattern;
   private routesKey = '';
-  private pipes: Array<Array<[number, number]>> = [];
   private roads: Array<Array<[number, number]>> = [];
 
   constructor(ctx: CanvasRenderingContext2D) {
@@ -23,54 +70,55 @@ export class GroundDecals {
     this.concrete.setTransform(scale);
   }
 
-  /** Подпись трасс (труб и дорог), проходящих через прямоугольник в клетках: часть ключа кеша земли. */
+  /**
+   * Подпись содержимого прямоугольника в клетках: трубы (тип по клеткам) и проходящие дороги.
+   * Часть ключа кеша земли — ячейка перепекается, только если здесь что-то поменялось.
+   */
   routesSignature(s: GameState, x0: number, y0: number, x1: number, y1: number): string {
     this.updateRoutes(s);
+    const n = s.map.size;
+    let pipes = '';
+    for (let y = Math.max(0, y0); y <= Math.min(n - 1, y1); y++)
+      for (let x = Math.max(0, x0); x <= Math.min(n - 1, x1); x++) pipes += s.map.pipes[y * n + x];
     const hits = (route: Array<[number, number]>) =>
       route.some(([ax, ay], i) => {
         if (i === 0) return false;
         const [bx, by] = route[i - 1];
         return Math.max(ax, bx) >= x0 && Math.min(ax, bx) <= x1 && Math.max(ay, by) >= y0 && Math.min(ay, by) <= y1;
       });
-    return [...this.pipes, ...this.roads]
+    const roads = this.roads
       .filter(hits)
       .map((r) => r.map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join(';'))
       .join('|');
+    return `${pipes}|${roads}`;
   }
 
-  /** Пересчитывает трассы, только когда меняется набор зданий. */
+  /**
+   * Дороги пересчитываются, только когда меняется набор зданий. Подъездная дорога идёт с «большой земли»
+   * к конторе, к каждому терминалу — ответвление в обход зданий (поиск пути по клеткам), чтобы бензовозы
+   * не проезжали сквозь объекты. Трубы дорогам не мешают: трубопровод на опорах пересекается переездом.
+   */
   private updateRoutes(s: GameState): void {
     const key = s.buildings.map((b) => `${b.id}:${b.type}:${b.x}:${b.y}`).join('|');
     if (key === this.routesKey) return;
     this.routesKey = key;
-    const storages = s.buildings.filter((b) => b.type === 'tank' || b.type === 'hq');
-    this.pipes = [];
-    for (const b of s.buildings) {
-      if (b.type !== 'pumpjack') continue;
-      // Выкидная линия выходит из устья в сторону −t (назад-влево) и идёт к ближайшему хранилищу.
-      const start: [number, number] = [b.x + 0.5 + (-0.5 - 0.27) * R2, b.y + 0.5 + (-0.27 + 0.5) * R2];
-      let best: Building | undefined;
-      let bestD = Infinity;
-      for (const t of storages) {
-        const d = Math.abs(t.x - b.x) + Math.abs(t.y - b.y);
-        if (d < bestD) {
-          bestD = d;
-          best = t;
-        }
-      }
-      if (!best) continue;
-      const end: [number, number] = [best.x + 0.5, best.y + 0.85];
-      this.pipes.push([start, [start[0], end[1]], end]);
-    }
+    const n = s.map.size;
     const hq = s.buildings.find((b) => b.type === 'hq');
     const hx = hq ? hq.x : HQ_POS.x;
     const hy = hq ? hq.y : HQ_POS.y;
     const front: [number, number] = [hx + 0.42, hy + 1.1];
-    // Подъездная дорога с «большой земли» и ответвления к терминалам.
     this.roads = [[[-1, hy + 1.1], front]];
+    const blocked = new Uint8Array(n * n);
+    for (const b of s.buildings) blocked[b.y * n + b.x] = 1;
+    const goal = (hy + 1) * n + hx;
     for (const b of s.buildings) {
       if (b.type !== 'terminal') continue;
-      this.roads.push([front, [front[0], b.y + 0.72], [b.x + 0.5, b.y + 0.72]]);
+      const path = roadPath(n, blocked, b.y * n + b.x, goal);
+      if (!path) continue;
+      const pts: Array<[number, number]> = [[b.x + 0.5, b.y + 0.72]];
+      for (let k = 1; k < path.length - 1; k++) pts.push([(path[k] % n) + 0.5, Math.floor(path[k] / n) + 0.72]);
+      pts.push([front[0], front[1]]);
+      this.roads.push(simplify(pts));
     }
   }
 
@@ -173,40 +221,97 @@ export class GroundDecals {
     ctx.restore();
   }
 
-  /** Трубопроводы на опорах: тень, тело трубы и блик со стороны солнца. */
-  drawPipes(ctx: CanvasRenderingContext2D): void {
+  /**
+   * Трубопроводы на опорах по клеткам с трубами в прямоугольнике (в клетках): каждая клетка рисует половинки
+   * отрезков к соседним трубам и отводы к примыкающим зданиям; одиночная клетка — заглушённый патрубок.
+   * Магистраль толще промысловой трубы. Тень, тело трубы и блик со стороны солнца.
+   */
+  drawPipes(ctx: CanvasRenderingContext2D, s: GameState, x0: number, y0: number, x1: number, y1: number): void {
+    const n = s.map.size;
+    const segs: Array<[number, number, number, number, number]> = [];
+    const flanges: Array<[number, number, number]> = [];
+    const byTile = new Map<number, Building>();
+    for (const b of s.buildings) byTile.set(b.y * n + b.x, b);
+    for (let y = Math.max(0, y0); y <= Math.min(n - 1, y1); y++) {
+      for (let x = Math.max(0, x0); x <= Math.min(n - 1, x1); x++) {
+        const kind = s.map.pipes[y * n + x];
+        if (!kind) continue;
+        const cx = x + 0.5;
+        const cy = y + 0.5;
+        let links = 0;
+        for (const [dx, dy] of SIDES) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+          const j = ny * n + nx;
+          const ex = cx + dx * 0.5;
+          const ey = cy + dy * 0.5;
+          const b = byTile.get(j);
+          if (b) {
+            links++;
+            segs.push([cx, cy, ex, ey, kind]);
+            if (b.type === 'pumpjack') {
+              // Отвод к устью скважины.
+              segs.push([ex, ey, b.x + WELLHEAD[0], b.y + WELLHEAD[1], 1]);
+            } else {
+              segs.push([ex, ey, ex + dx * 0.16, ey + dy * 0.16, kind]);
+              flanges.push([ex + dx * 0.16, ey + dy * 0.16, kind]);
+            }
+          } else if (s.map.pipes[j]) {
+            links++;
+            segs.push([cx, cy, ex, ey, kind]);
+          }
+        }
+        if (links === 0) {
+          segs.push([cx - 0.3, cy, cx + 0.3, cy, kind]);
+          flanges.push([cx - 0.3, cy, kind], [cx + 0.3, cy, kind]);
+        } else if (links === 1) flanges.push([cx, cy, kind]); // конец линии — заглушка
+      }
+    }
+    if (!segs.length) return;
     ctx.lineJoin = 'round';
-    ctx.lineCap = 'butt';
+    ctx.lineCap = 'round';
+    // Шпалы-опоры поперёк трубы.
+    ctx.fillStyle = 'rgba(70,60,48,0.8)';
+    for (const [ax, ay, bx, by, kind] of segs) {
+      const len = Math.hypot(bx - ax, by - ay);
+      const w = kind === 2 ? 0.09 : 0.06;
+      for (let d = 0.175; d < len; d += 0.35) {
+        const px = ax + ((bx - ax) * d) / len;
+        const py = ay + ((by - ay) * d) / len;
+        if (Math.abs(bx - ax) > Math.abs(by - ay)) ctx.fillRect(px - 0.012, py - w, 0.024, w * 2);
+        else ctx.fillRect(px - w, py - 0.012, w * 2, 0.024);
+      }
+    }
     const pass = (style: string, w: number, dx: number, dy: number) => {
       ctx.strokeStyle = style;
-      ctx.lineWidth = w;
-      for (const p of this.pipes) {
+      for (const kind of [1, 2]) {
+        ctx.lineWidth = w * (kind === 2 ? 1.7 : 1);
         ctx.beginPath();
-        p.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x + dx, y + dy) : ctx.lineTo(x + dx, y + dy)));
+        for (const [ax, ay, bx, by, k] of segs) {
+          if (k !== kind) continue;
+          ctx.moveTo(ax + dx, ay + dy);
+          ctx.lineTo(bx + dx, by + dy);
+        }
         ctx.stroke();
       }
     };
-    // Шпалы-опоры.
-    ctx.fillStyle = 'rgba(70,60,48,0.8)';
-    for (const p of this.pipes) {
-      for (let i = 0; i + 1 < p.length; i++) {
-        const [ax, ay] = p[i];
-        const [bx, by] = p[i + 1];
-        const len = Math.hypot(bx - ax, by - ay);
-        const n = Math.floor(len / 0.35);
-        for (let k = 1; k <= n; k++) {
-          const t = (k * 0.35) / len;
-          const x = ax + (bx - ax) * t;
-          const y = ay + (by - ay) * t;
-          if (Math.abs(bx - ax) > Math.abs(by - ay)) ctx.fillRect(x - 0.012, y - 0.06, 0.024, 0.12);
-          else ctx.fillRect(x - 0.06, y - 0.012, 0.12, 0.024);
-        }
-      }
-    }
     pass('rgba(30,24,16,0.4)', 0.07, 0.03, -0.06);
     pass('#3f454b', 0.064, 0, 0);
     pass('#6d757c', 0.04, -0.004, 0.008);
     pass('rgba(190,198,204,0.55)', 0.01, -0.01, 0.018);
+    // Фланцы и заглушки.
+    for (const [fx, fy, kind] of flanges) {
+      const r = kind === 2 ? 0.075 : 0.05;
+      ctx.fillStyle = '#353a40';
+      ctx.beginPath();
+      ctx.arc(fx, fy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(190,198,204,0.5)';
+      ctx.beginPath();
+      ctx.arc(fx - r * 0.2, fy + r * 0.25, r * 0.45, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   private roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {

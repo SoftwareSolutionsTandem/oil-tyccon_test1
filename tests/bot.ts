@@ -113,7 +113,8 @@ function decide(s: GameState): void {
   const cap = storageCapacity(s);
   const hasTerminal = countOf(s, 'terminal') > 0;
   // Продаём вручную, когда качалки упёрлись в заполненные хранилища (так это видит игрок по статусу «склад полон»).
-  const stuck = s.buildings.some((b) => b.type === 'pumpjack' && b.status === 'full');
+  // Склад почти полон, а качалки упираются в трубу к единственному свободному хранилищу — тоже повод продать.
+  const stuck = s.buildings.some((b) => b.type === 'pumpjack' && (b.status === 'full' || (b.status === 'throttled' && s.oil > cap * 0.7)));
   if (stuck || (s.oil > cap * 0.9 && (!hasTerminal || terminalThroughput(s) < productionCapacity(s) * 0.5))) sellManual(s);
 
   if (s.unlocked.includes('terminal') && terminalThroughput(s) < productionCapacity(s)) {

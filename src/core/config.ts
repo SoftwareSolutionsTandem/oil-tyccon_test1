@@ -120,7 +120,7 @@ export interface PipeSpec {
  */
 export const PIPES: Record<1 | 2, PipeSpec> = {
   1: { name: 'Промысловый трубопровод', cost: 10, capacity: 2 },
-  2: { name: 'Магистральный трубопровод', cost: 30, capacity: 8 },
+  2: { name: 'Магистральный трубопровод', cost: 30, capacity: 16 },
 };
 /** Доля стоимости трубы, возвращаемая при демонтаже. */
 export const PIPE_REFUND = 0.5;

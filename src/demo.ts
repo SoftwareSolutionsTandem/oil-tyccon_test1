@@ -34,6 +34,11 @@ export function createDemoState(): GameState {
     const b = core.buildingAt(s, x, y)!;
     for (let l = 1; l < level; l++) core.upgrade(s, b.id);
   }
+  // Сеть: резервуары и терминал соединяются с конторой, качалки — к ближайшей трубе или хранилищу
+  // (кнопка «Подключить»); участок от конторы к резервуарам — магистраль.
+  const ordered = [...s.buildings].sort((a, b) => (a.type === b.type ? a.id - b.id : a.type === 'tank' ? -1 : b.type === 'tank' ? 1 : 0));
+  for (const b of ordered) if (b.type !== 'hq') core.autoConnect(s, b.id);
+  core.layPipes(s, core.pipePath([hx + 1, hy], [hx + 1, hy + 1]), 2);
   core.buyParcel(s, core.START_PARCEL.px + 1, core.START_PARCEL.py);
   for (let i = 0; i < 1200; i++) core.tick(s, core.TICK);
   return s;

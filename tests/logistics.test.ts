@@ -151,6 +151,40 @@ describe('пропускная способность', () => {
     expectOilConserved(s);
   });
 
+  it('перегруженная ветка: остаток потока уходит в другое хранилище по свободной трубе', () => {
+    const make = (withTank: boolean) => {
+      const s = field();
+      layPipes(s, pipePath([HX, HY + 1], [HX + 5, HY + 1]), 1);
+      // 4 × 0,65 = 2,6 барр./с при пропускной способности 2.
+      const ps = [HX + 2, HX + 4].flatMap((x) => [pump(s, x, HY), pump(s, x, HY + 2)]);
+      for (const p of ps) p.level = 3;
+      // Резервуар на другом конце трубы: к нему ведут другие клетки, чем к конторе.
+      if (withTank) {
+        expect(build(s, 'tank', HX + 6, HY + 1).ok).toBe(true);
+        s.buildings[s.buildings.length - 1].level = 3;
+      }
+      run(s, 20);
+      return s;
+    };
+    const one = make(false);
+    const two = make(true);
+    expect(one.totals.produced / 20).toBeLessThanOrEqual(PIPES[1].capacity + 1e-6);
+    expect(two.totals.produced / 20).toBeGreaterThan(PIPES[1].capacity * 1.2);
+    expectOilConserved(two);
+  });
+
+  it('если все хранилища полны, причина простоя — склад, а не труба', () => {
+    const s = field();
+    layPipes(s, pipePath([HX, HY + 1], [HX + 6, HY + 1]), 1);
+    const ps = [HX + 2, HX + 4, HX + 6].flatMap((x) => [pump(s, x, HY), pump(s, x, HY + 2)]);
+    for (const p of ps) p.level = 3;
+    run(s, 5);
+    expect(ps.every((p) => p.status === 'throttled')).toBe(true);
+    run(s, 60); // 60 барр. конторы заполняются за 30 с
+    expect(s.oil).toBeCloseTo(HQ_STORAGE, 6);
+    expect(ps.every((p) => p.status === 'full')).toBe(true);
+  });
+
   it('результат не зависит от порядка зданий в массиве', () => {
     const make = () => {
       const s = field();

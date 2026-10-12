@@ -1,5 +1,10 @@
 import {
   drainageTiles,
+  getNetwork,
+  isTileOwned,
+  lastFlow,
+  levelSpec,
+  pipeCapacity,
   PARCEL_SIZE,
   PARCELS_PER_SIDE,
   isParcelOwned,
@@ -26,6 +31,11 @@ export interface ViewState {
   ghost: { type: BuildableType; ok: boolean } | null;
   selectedBuilding: number | null;
   highlightParcel: { px: number; py: number } | null;
+  /** Предпросмотр протяжки трубы: клетки, допустимость, демонтаж ли это. */
+  pipePlan?: { tiles: Array<[number, number]>; ok: boolean; remove: boolean } | null;
+  /** Слой сети: 'full' — загрузка всех труб и точки подключения, 'selection' — сеть и маршрут выбранного. */
+  network?: 'full' | 'selection' | null;
+  selectedPipe?: { x: number; y: number } | null;
 }
 
 interface FloatText {
@@ -332,6 +342,16 @@ export class Renderer {
         this.tileOutline(zx, zy, 'rgba(92,225,230,0.55)', 0.025);
       }
     }
+    if (view.network) this.drawNetworkOverlay(s, view, selected ?? null);
+    if (view.pipePlan) {
+      const { tiles, ok, remove } = view.pipePlan;
+      const fillStyle = !ok ? 'rgba(235,80,70,0.3)' : remove ? 'rgba(240,150,60,0.35)' : 'rgba(90,220,120,0.32)';
+      for (const [x, y] of tiles) {
+        if (x < 0 || y < 0 || x >= n || y >= n) continue;
+        ctx.fillStyle = fillStyle;
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
     if (selected) this.tileOutline(selected.x, selected.y, 'rgba(92,225,230,0.95)', 0.05);
     if (view.hover) {
       if (view.ghost) {
@@ -411,7 +431,7 @@ export class Renderer {
       .filter((b) => b.x >= x0 - 3 && b.x < x0 + CELL + 3 && b.y >= y0 - 3 && b.y < y0 + CELL + 3)
       .map((b) => `${b.type}:${b.x}:${b.y}:${b.level}`)
       .join('|');
-    const routes = this.decals.routesSignature(s, x0 - 1, y0 - 1, x0 + CELL + 1, y0 + CELL + 1);
+    const routes = this.decals.routesSignature(s, x0 - 1, y0 - 1, x0 + CELL, y0 + CELL);
     return `${owned}/${stains}/${buildings}/${routes}`;
   }
 
@@ -463,7 +483,7 @@ export class Renderer {
     ctx.globalAlpha = 1;
     this.decals.drawRoads(ctx, s);
     for (const b of s.buildings) if (b.x >= x0 - 2 && b.x < x0 + CELL + 2 && b.y >= y0 - 2 && b.y < y0 + CELL + 2) this.decals.drawPad(ctx, b);
-    this.decals.drawPipes(ctx);
+    this.decals.drawPipes(ctx, s, x0 - 1, y0 - 1, x0 + CELL, y0 + CELL);
 
     const pMin = (v: number) => Math.max(0, Math.floor((v - 1) / PARCEL_SIZE));
     const pMax = (v: number) => Math.min(PARCELS_PER_SIDE - 1, Math.floor((v + CELL) / PARCEL_SIZE));
@@ -522,6 +542,84 @@ export class Renderer {
     ctx.setTransform(scale, 0, 0, scale, -ox * scale, -oy * scale);
     for (const p of placed) ctx.drawImage(p.sh.canvas, p.x, p.y, p.sh.w, p.sh.h);
     return { canvas, ox, oy, w, h };
+  }
+
+  /**
+   * Слой сети трубопроводов (в координатах клеток). Полный — при работе с трубами: загрузка каждой трубы
+   * (зелёный — запас, жёлтый — почти предел, красный — узкое место), трубы без хранилища, неподключённые
+   * здания и свободные точки подключения у хранилищ. Выборочный — сеть выбранной трубы или хранилища,
+   * маршрут нефти выбранной качалки или терминала.
+   */
+  private drawNetworkOverlay(s: GameState, view: ViewState, selected: Building | null): void {
+    const { ctx } = this;
+    const n = s.map.size;
+    const net = getNetwork(s);
+    const flow = lastFlow(s);
+    const pulse = 0.6 + 0.4 * Math.sin(this.clock * 5);
+    const loadColor = (i: number): string => {
+      const comp = net.components[net.compOfTile[i]];
+      if (!comp || comp.storages.length === 0) return 'rgba(150,150,150,';
+      const cap = pipeCapacity(s.map.pipes[i]);
+      const u = flow && cap > 0 ? flow.demand[i] / cap : 0;
+      if (u > 1.0001) return 'rgba(235,70,55,';
+      if (u > 0.8) return 'rgba(240,190,60,';
+      if (u > 0.005) return 'rgba(90,220,120,';
+      return 'rgba(120,190,235,';
+    };
+    if (view.network === 'full') {
+      for (let i = 0; i < n * n; i++) {
+        if (!s.map.pipes[i]) continue;
+        const x = i % n;
+        const y = (i - x) / n;
+        const c = loadColor(i);
+        ctx.fillStyle = `${c}0.3)`;
+        ctx.fillRect(x, y, 1, 1);
+        const cap = pipeCapacity(s.map.pipes[i]);
+        if (flow && flow.demand[i] > cap + 1e-4) this.tileOutline(x, y, `rgba(235,70,55,${pulse})`, 0.06);
+      }
+      // Свободные точки подключения: клетки своей земли рядом с хранилищами.
+      for (const b of s.buildings) {
+        if (b.type === 'hq' || b.type === 'tank') {
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const x = b.x + dx;
+            const y = b.y + dy;
+            if (x < 0 || y < 0 || x >= n || y >= n || !isTileOwned(s, x, y)) continue;
+            const j = y * n + x;
+            if (s.map.pipes[j] || s.buildings.some((o) => o.x === x && o.y === y)) continue;
+            ctx.fillStyle = 'rgba(92,225,230,0.85)';
+            ctx.beginPath();
+            ctx.arc(x + 0.5 - dx * 0.35, y + 0.5 - dy * 0.35, 0.09, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        } else if (b.status === 'no_route') this.tileOutline(b.x, b.y, `rgba(235,70,55,${pulse})`, 0.07);
+      }
+      return;
+    }
+    // Выборочный слой.
+    let comp = -1;
+    if (view.selectedPipe) comp = net.compOfTile[view.selectedPipe.y * n + view.selectedPipe.x];
+    else if (selected && (selected.type === 'hq' || selected.type === 'tank')) comp = net.compOfTile[selected.y * n + selected.x];
+    if (comp >= 0) {
+      for (const i of net.components[comp].pipeTiles) {
+        ctx.fillStyle = `${loadColor(i)}0.28)`;
+        ctx.fillRect(i % n, Math.floor(i / n), 1, 1);
+      }
+      for (const st of net.components[comp].storages) this.tileOutline(st.x, st.y, 'rgba(92,225,230,0.7)', 0.04);
+      if (view.selectedPipe) this.tileOutline(view.selectedPipe.x, view.selectedPipe.y, 'rgba(92,225,230,0.95)', 0.05);
+      return;
+    }
+    if (selected && (selected.type === 'pumpjack' || selected.type === 'terminal')) {
+      const f = flow?.clients.get(selected.id);
+      const path = f?.path ?? net.routes.get(selected.id);
+      if (!path) return;
+      for (const i of path) {
+        ctx.fillStyle = `${loadColor(i)}0.3)`;
+        ctx.fillRect(i % n, Math.floor(i / n), 1, 1);
+      }
+      const target = f ? s.buildings.find((b) => b.id === f.storage) : net.reach.get(selected.id)?.[0]?.storage;
+      if (target) this.tileOutline(target.x, target.y, 'rgba(92,225,230,0.8)', 0.05);
+      if (f && f.bottleneck >= 0) this.tileOutline(f.bottleneck % n, Math.floor(f.bottleneck / n), `rgba(235,70,55,${pulse})`, 0.07);
+    }
   }
 
   private tileOutline(x: number, y: number, color: string, w: number): void {
@@ -602,7 +700,9 @@ export class Renderer {
     for (const b of s.buildings) {
       occupied.add(b.y * s.map.size + b.x);
       if (!this.tileVisible(r, b.x, b.y)) continue;
-      items.push(this.buildingItem(b, fill));
+      // Уровень в резервуаре — его собственный запас (нефть хранится по месту).
+      const own = b.type === 'tank' || b.type === 'hq' ? Math.min(1, (b.stored ?? 0) / Math.max(1, levelSpec(b).value)) : fill;
+      items.push(this.buildingItem(b, own));
       if (b.type === 'hq') items.push(this.hqTrucksItem(b));
     }
     for (let i = 0; i < s.map.decor.length; i++) {
@@ -785,7 +885,7 @@ export class Renderer {
     if (b.type === 'terminal') {
       let t = this.truckT.get(b.id) ?? 0;
       const moving = t >= TRUCK_LOAD;
-      if (b.status === 'ok' || moving) t += simDt * (0.2 + 0.07 * b.level);
+      if (b.status === 'ok' || b.status === 'throttled' || moving) t += simDt * (0.2 + 0.07 * b.level);
       else t = Math.min(t, TRUCK_LOAD - 0.01);
       if (t >= 1) {
         t -= 1;
@@ -970,6 +1070,8 @@ export class Renderer {
       depleted: ['×', '#7d8590'],
       off: ['z', '#5c6b7a'],
       waiting_price: ['$', '#d4a017'],
+      no_route: ['⌁', '#e0533d'],
+      throttled: ['≈', '#d4a017'],
     };
     const badge = badges[b.status];
     if (!badge) return;

@@ -7,7 +7,7 @@ import {
   recordStat,
   upgradeCost,
 } from './economy';
-import { componentOf, getNetwork, storedIn, syncOil } from './network';
+import { componentOf, getNetwork, lastFlow, storedIn, syncOil } from './network';
 import type { ActionResult, BuildableType, GameState } from './types';
 import {
   buildingAt,
@@ -319,6 +319,17 @@ export function planAutoConnect(s: GameState, id: number, kind: 1 | 2 = 1): Pipe
   const cost = missing.length * PIPES[kind].cost;
   if (missing.length === 0) return { ok: false, reason: 'Уже подключено', tiles: [], cost: 0 };
   return { ok: s.cash >= cost, reason: s.cash >= cost ? undefined : 'Недостаточно денег', tiles: missing, cost };
+}
+
+/** Замена промысловых участков маршрута качалки или терминала магистралью — снятие узкого места одной кнопкой. */
+export function planRouteUpgrade(s: GameState, id: number): PipePlan {
+  // Фактический маршрут последнего тика (нефть могла пойти в дальнее хранилище), иначе — к ближайшему.
+  const route = lastFlow(s)?.clients.get(id)?.path ?? getNetwork(s).routes.get(id);
+  const n = s.map.size;
+  if (!route) return { ok: false, reason: 'Нет маршрута до хранилища', tiles: [], cost: 0 };
+  const tiles = route.filter((t) => s.map.pipes[t] === 1).map((t) => [t % n, Math.floor(t / n)] as PipeTile);
+  if (tiles.length === 0) return { ok: false, reason: 'Маршрут уже магистральный', tiles: [], cost: 0 };
+  return planPipes(s, tiles, 2);
 }
 
 export function autoConnect(s: GameState, id: number, kind: 1 | 2 = 1): ActionResult {

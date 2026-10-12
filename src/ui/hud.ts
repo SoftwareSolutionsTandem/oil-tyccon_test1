@@ -1,6 +1,6 @@
 import * as core from '../core';
 import type { BuildableType, Building, GameState } from '../core';
-import type { Game, ToastKind } from '../game';
+import { isPipeTool, PIPE_TOOLS, type Game, type PipeTool, type ToastKind } from '../game';
 import { formatClock } from '../render/daylight';
 import { bbl, duration, money, num, price, rate } from './format';
 
@@ -33,6 +33,7 @@ export class Hud {
   private root: HTMLElement;
   private refs: Record<string, HTMLElement> = {};
   private buildCards = new Map<BuildableType, HTMLButtonElement>();
+  private pipeCards = new Map<PipeTool, HTMLButtonElement>();
   private speedButtons = new Map<number, HTMLButtonElement>();
   private selectionPanel: HTMLElement;
   private selectionInfo: HTMLElement;
@@ -105,6 +106,25 @@ export class Hud {
       this.buildCards.set(type, card);
       build.append(card);
     }
+    const pipes = el('div', 'tools');
+    for (const tool of ['pipe', 'trunk', 'unpipe'] as PipeTool[]) {
+      const spec = PIPE_TOOLS[tool];
+      const card = el('button', 'build-card');
+      const meta =
+        spec.kind === 0
+          ? `Возврат ${Math.round(core.PIPE_REFUND * 100)}% стоимости`
+          : `Пропускная способность ${num(core.PIPES[spec.kind].capacity * 60)} барр./мин`;
+      const cost = spec.kind === 0 ? '' : `${money(core.PIPES[spec.kind].cost)}/кл.`;
+      card.innerHTML = `<div class="row"><span><span class="name">${spec.name}</span><span class="key">${spec.hotkey}</span></span><span class="cost">${cost}</span></div><div class="meta">${meta}</div>`;
+      card.title =
+        spec.kind === 0
+          ? 'Протяните по трубам, которые нужно убрать'
+          : 'Протяните мышью от здания или трубы: труба ляжет по своей свободной земле уголком. Поверх промысловой трубы магистраль ляжет как улучшение.';
+      card.onclick = () => this.game.setMode(tool);
+      this.pipeCards.set(tool, card);
+      pipes.append(card);
+    }
+    build.append(el('h3', '', 'Трубопроводы'), pipes);
     const objective = el('div', 'panel objective', '<h3>Цель</h3><div class="body"></div>');
     this.refs.objective = objective.querySelector('.body')!;
     left.append(build, objective);
@@ -212,6 +232,7 @@ export class Hud {
       if (metaEl.textContent !== meta) metaEl.textContent = meta;
       card.disabled = unlocked && s.cash < cost && this.game.mode !== type;
     }
+    for (const [tool, card] of this.pipeCards) card.classList.toggle('active', this.game.mode === tool);
   }
 
   private updateObjective(): void {
@@ -271,6 +292,30 @@ export class Hud {
         if (key !== this.selectionKey) this.selectionActions.replaceChildren(...this.buildingActions(b));
         this.refreshActionState(b);
       }
+    } else if (sel?.kind === 'pipe') {
+      const i = core.tileIndex(s, sel.x, sel.y);
+      const kind = s.map.pipes[i];
+      if (!kind) {
+        this.game.selection = null;
+      } else {
+        key = `pipe:${sel.x}:${sel.y}:${kind}`;
+        this.selectionInfo.innerHTML = this.pipeInfo(i, kind as 1 | 2);
+        if (key !== this.selectionKey) {
+          const out: HTMLElement[] = [];
+          if (kind === 1) {
+            const up = el('button', 'primary', `Заменить на магистраль · ${money(core.PIPES[2].cost - core.PIPES[1].cost)}`);
+            up.dataset.role = 'pipe-up';
+            up.onclick = () => this.game.pipeTile(sel.x, sel.y, 'upgrade');
+            out.push(up);
+          }
+          const rm = el('button', 'danger', `Демонтировать (+${money(Math.round(core.PIPES[kind as 1 | 2].cost * core.PIPE_REFUND))})`);
+          rm.onclick = () => this.game.pipeTile(sel.x, sel.y, 'remove');
+          out.push(rm);
+          this.selectionActions.replaceChildren(...out);
+        }
+        const up = this.selectionActions.querySelector<HTMLButtonElement>('[data-role=pipe-up]');
+        if (up) up.disabled = s.cash < core.PIPES[2].cost - core.PIPES[1].cost;
+      }
     } else if (sel?.kind === 'parcel') {
       key = `p:${sel.px}:${sel.py}`;
       const survey = core.parcelSurvey(s, sel.px, sel.py);
@@ -295,6 +340,61 @@ export class Hud {
     this.selectionPanel.style.display = key ? '' : 'none';
   }
 
+  /** Сеть, в которую входит клетка: хранилища, запас, подключённые здания. */
+  private networkSummary(comp: core.NetComponent | null): string {
+    if (!comp) return kv('Сеть', 'нет');
+    if (comp.storages.length === 0) return kv('Сеть', '<span style="color:var(--bad)">без хранилища — нефть не идёт</span>');
+    return (
+      kv('Хранилищ в сети', `${comp.storages.length} · ${num(core.storedIn(comp))} / ${num(comp.capacity)} барр.`) +
+      kv('Подключено', `качалок ${comp.pumps.length}, терминалов ${comp.terminals.length}`)
+    );
+  }
+
+  private pipeInfo(i: number, kind: 1 | 2): string {
+    const s = this.s;
+    const spec = core.PIPES[kind];
+    const flow = core.lastFlow(s);
+    const demand = flow ? flow.demand[i] : 0;
+    const actual = flow ? flow.actual[i] : 0;
+    const load = demand / spec.capacity;
+    const net = core.getNetwork(s);
+    const comp = net.components[net.compOfTile[i]] ?? null;
+    const state =
+      load > 1.0001
+        ? `<span class="status bad">Узкое место: нужно ${rate(demand * 60)}</span>`
+        : load > 0.8
+          ? '<span class="status warn">Почти на пределе</span>'
+          : '<span class="status ok">Есть запас пропускной способности</span>';
+    return `<div class="sel-title">${spec.name}</div>${state}
+      ${kv('Пропускная способность', rate(spec.capacity * 60))}
+      ${kv('Поток сейчас', `${rate(actual * 60)} · ${Math.round(Math.min(load, 9.99) * 100)}%`)}
+      ${this.networkSummary(comp)}
+      <div class="small" style="margin-top:6px">${kind === 1 ? 'Промысловую трубу можно заменить магистралью: протяните инструментом «Магистраль» (5) поверх или нажмите кнопку ниже.' : 'Магистраль пропускает в 4 раза больше промысловой трубы.'} Каждая качалка гонит нефть в ближайшее хранилище сети со свободным местом; нагрузка трубы — сумма потоков через неё.</div>`;
+  }
+
+  /** Подключение качалки или терминала: куда идёт нефть и что её ограничивает. */
+  private connectionInfo(b: Building): string {
+    const s = this.s;
+    const f = core.lastFlow(s)?.clients.get(b.id);
+    if (b.status === 'no_route') {
+      const plan = core.planAutoConnect(s, b.id);
+      return `<div class="sep"></div>${kv('Подключение', '<span style="color:var(--bad)">нет пути до хранилища</span>')}
+        <div class="small">${b.type === 'pumpjack' ? 'Нефть не добывается' : 'Терминал не может забирать нефть'}, пока здание не соединено трубой с конторой или резервуаром. ${plan.tiles.length ? `Кратчайшая труба: ${plan.tiles.length} кл. за ${money(plan.cost)}.` : plan.reason ?? ''}</div>`;
+    }
+    if (!f) return '';
+    const target = core.getBuilding(s, f.storage);
+    const where = target ? `${core.buildingName(target.type)}${f.path.length ? `, ${f.path.length} кл. трубы` : ', вплотную'}` : '—';
+    let out = `<div class="sep"></div>${kv(b.type === 'pumpjack' ? 'Нефть идёт в' : 'Забирает из', where)}`;
+    if (f.bottleneck >= 0) {
+      const kind = s.map.pipes[f.bottleneck] as 1 | 2;
+      const demand = core.lastFlow(s)!.demand[f.bottleneck];
+      out +=
+        kv('Фактически / возможно', `${rate(f.actual * 60)} / ${rate(f.want * 60)}`) +
+        `<div class="small" style="color:var(--warn)">Узкое место — ${core.PIPES[kind].name.toLowerCase()} (подсвечена): через неё хотят пройти ${rate(demand * 60)} при пропускной способности ${rate(core.PIPES[kind].capacity * 60)}. Замените участок магистралью, проложите отдельную трубу или поставьте резервуар ближе.</div>`;
+    }
+    return out;
+  }
+
   private buildingInfo(b: Building): string {
     const s = this.s;
     const name = core.buildingName(b.type);
@@ -302,7 +402,7 @@ export class Hud {
     const head = `<div class="sel-title">${name}${b.type !== 'hq' ? ` · ур. ${b.level}` : ''}</div><span class="status ${statusCls}">${statusText}</span>`;
     const upkeep = kv('Содержание', `${money(core.buildingUpkeep(b) * 60)}/мин`);
     if (b.type === 'hq') {
-      return `${head}${kv('Склад при конторе', bbl(core.HQ_STORAGE))}${kv('Продажа перекупщику', `${price(core.manualSellPrice(s))} за барр.`)}<div class="small">Здесь начинается ваша компания. Перекупщик забирает нефть сразу, но платит на 20% меньше рынка.</div>`;
+      return `${head}${kv('Склад при конторе', `${num(b.stored ?? 0)} / ${num(core.HQ_STORAGE)} барр.`)}${this.networkSummary(core.componentOf(s, b))}${kv('Продажа перекупщику', `${price(core.manualSellPrice(s))} за барр.`)}<div class="small">Здесь начинается ваша компания. Перекупщик забирает нефть из всех хранилищ сразу (своими машинами, трубы не нужны), но платит на 20% меньше рынка.</div>`;
     }
     const spec = core.levelSpec(b);
     const next = core.upgradeCost(b) !== null ? core.BUILDINGS[b.type].levels[b.level] : null;
@@ -317,15 +417,18 @@ export class Hud {
         ${upkeep}
         ${kv(`Запасы зоны (${zone} кл.)`, `${num(pool.reserve)} / ${num(pool.initial)}`)}
         ${kv('Хватит при работе без простоев', r > 0 ? duration(timeLeft) : '—')}
+        ${this.connectionInfo(b)}
         ${next ? `<div class="sep"></div>${kv('След. уровень: добыча', rate(next.value * 60 * (r / spec.value || 1)))}${kv('След. уровень: содержание', `${money(next.upkeep * 60)}/мин`)}` : ''}
         <div class="small" style="margin-top:6px">Скважина тянет нефть из своей клетки и соседних по сторонам клеток месторождения (зона подсвечена). Добыча снижается по мере истощения (до ${Math.round(core.DEPLETION_MIN_FACTOR * 100)}% от номинала).</div>`;
     }
     if (b.type === 'tank') {
-      return `${head}${kv('Ёмкость', bbl(spec.value))}${upkeep}${kv('Всё хранилище', `${num(s.oil)} / ${num(core.storageCapacity(s))}`)}${next ? `<div class="sep"></div>${kv('След. уровень: ёмкость', bbl(next.value))}` : ''}`;
+      return `${head}${kv('В резервуаре', `${num(b.stored ?? 0)} / ${num(spec.value)} барр.`)}${upkeep}<div class="sep"></div>${this.networkSummary(core.componentOf(s, b))}${kv('Вся нефть компании', `${num(s.oil)} / ${num(core.storageCapacity(s))}`)}${next ? `<div class="sep"></div>${kv('След. уровень: ёмкость', bbl(next.value))}` : ''}
+        <div class="small" style="margin-top:6px">Нефть хранится по месту: качалки сети заполняют сначала ближайшее хранилище. Сами резервуары между собой не перекачивают, но терминал забирает из ближайшего, где есть нефть.</div>`;
     }
     return `${head}
       ${kv('Отгрузка', rate(spec.value * 60))}
       ${upkeep}
+      ${this.connectionInfo(b)}
       ${next ? `<div class="sep"></div>${kv('След. уровень: отгрузка', rate(next.value * 60))}` : ''}
       <div class="sep"></div>
       ${kv('Мин. цена продажи', s.sellThreshold > 0 ? price(s.sellThreshold) : 'любая')}
@@ -343,6 +446,21 @@ export class Hud {
     up.dataset.role = 'upgrade';
     up.onclick = () => this.game.upgrade(b.id);
     out.push(up);
+    if (b.type === 'pumpjack' || b.type === 'terminal') {
+      const connect = el('button', 'primary');
+      connect.dataset.role = 'connect';
+      connect.onclick = () => this.game.connect(b.id);
+      const route = el('button');
+      route.dataset.role = 'route';
+      route.onclick = () => this.game.upgradeRoute(b.id);
+      out.push(connect, route);
+    }
+    if (b.type === 'tank') {
+      const connect = el('button');
+      connect.dataset.role = 'connect';
+      connect.onclick = () => this.game.connect(b.id);
+      out.push(connect);
+    }
     if (b.type === 'terminal') {
       const slider = el('input') as HTMLInputElement;
       slider.type = 'range';
@@ -367,6 +485,30 @@ export class Hud {
   }
 
   private refreshActionState(b: Building): void {
+    const s = this.s;
+    const connect = this.selectionActions.querySelector<HTMLButtonElement>('[data-role=connect]');
+    if (connect) {
+      // Кнопка видна, только когда подключение нужно (резервуар — к другой сети с хранилищем).
+      const needed = b.type === 'tank' ? true : b.status === 'no_route';
+      const plan = needed ? core.planAutoConnect(s, b.id) : null;
+      const show = !!plan && plan.tiles.length > 0;
+      connect.style.display = show ? '' : 'none';
+      if (plan && show) {
+        connect.textContent = `${b.type === 'tank' ? 'Соединить с хранилищами' : 'Подключить трубой'} · ${plan.tiles.length} кл. · ${money(plan.cost)}`;
+        connect.disabled = !plan.ok;
+      }
+    }
+    const route = this.selectionActions.querySelector<HTMLButtonElement>('[data-role=route]');
+    if (route) {
+      const throttled = b.status === 'throttled';
+      const plan = throttled ? core.planRouteUpgrade(s, b.id) : null;
+      const show = !!plan && plan.tiles.length > 0;
+      route.style.display = show ? '' : 'none';
+      if (plan && show) {
+        route.textContent = `Усилить маршрут магистралью · ${plan.tiles.length} кл. · ${money(plan.cost)}`;
+        route.disabled = !plan.ok;
+      }
+    }
     const up = this.selectionActions.querySelector<HTMLButtonElement>('[data-role=upgrade]');
     if (!up) return;
     const cost = core.upgradeCost(b);
@@ -380,6 +522,16 @@ export class Hud {
     let text = '';
     if (g.hoverOutside) {
       text = 'За границей лицензионной территории: эта земля не продаётся и не застраивается';
+    } else if (isPipeTool(g.mode)) {
+      const p = g.pipePreview();
+      const spec = PIPE_TOOLS[g.mode];
+      if (!p) text = `${spec.name}: наведите на карту`;
+      else if (p.tool === 'unpipe') text = p.ok ? `Демонтаж: ${p.count} кл., возврат ${money(p.cost)}` : `Демонтаж: ${p.reason}`;
+      else {
+        const cap = core.PIPES[spec.kind as 1 | 2].capacity * 60;
+        const what = p.ok ? `${p.count} кл. · ${money(p.cost)}` : p.reason;
+        text = `${spec.name} (${num(cap)} барр./мин): ${what}. ${g.pipeStart ? 'Отпустите кнопку, чтобы проложить' : 'Нажмите и протяните от здания или трубы'}; ПКМ или Esc — отмена`;
+      }
     } else if (g.mode) {
       const name = core.BUILDINGS[g.mode].name;
       let reason = '';
@@ -395,6 +547,7 @@ export class Hud {
       const i = core.tileIndex(s, g.hover.x, g.hover.y);
       const b = core.buildingAt(s, g.hover.x, g.hover.y);
       if (b) text = core.buildingName(b.type);
+      else if (s.map.pipes[i] > 0) text = `${core.PIPES[s.map.pipes[i] as 1 | 2].name} — щёлкните, чтобы увидеть загрузку`;
       else if (s.map.initial[i] > 0) text = `Месторождение: ${bbl(s.map.reserve[i])}${core.isTileOwned(s, g.hover.x, g.hover.y) ? ' — постройте качалку (1)' : ''}`;
       else if (!core.isTileOwned(s, g.hover.x, g.hover.y)) text = 'Чужой участок — щёлкните, чтобы узнать цену';
     }
@@ -431,12 +584,13 @@ export class Hud {
       `<p>Вы — владелец маленькой нефтяной компании. Превратите одну скважину в нефтяную империю.</p>
       <ul>
         <li><b>Добыча.</b> Ставьте станки-качалки на тёмные пятна месторождений. Запасы истощаются — добыча постепенно падает.</li>
+        <li><b>Трубопроводы.</b> Качалка отдаёт нефть только по трубе в контору или резервуар (или стоя вплотную к ним). Тяните трубу инструментом «Трубопровод» (4) или нажмите «Подключить» у качалки. Труба пропускает ограниченный поток — перегруженный участок замените магистралью (5).</li>
         <li><b>Хранение.</b> Нефть копится на складе. Когда он полон, качалки простаивают, но содержание платить всё равно нужно.</li>
         <li><b>Продажа.</b> Вручную — перекупщику со скидкой 20%. Наливной терминал продаёт сам и по полной цене, можно задать минимальную цену.</li>
         <li><b>Рынок.</b> Цена колеблется. Резервуары позволяют придержать нефть до роста цены.</li>
         <li><b>Развитие.</b> Улучшайте здания, покупайте соседние участки с новыми месторождениями.</li>
       </ul>
-      <p class="small">Управление: перетаскивание или стрелки — камера, колесо — масштаб, 1/2/3 — строительство, S — продать, пробел — пауза, Esc — отмена. Игра сохраняется автоматически и продолжает работать, пока вас нет (до 4 часов).</p>`,
+      <p class="small">Управление: перетаскивание или стрелки — камера, колесо — масштаб, 1/2/3 — строительство, 4/5 — трубы, X — демонтаж трубы, S — продать, пробел — пауза, Esc — отмена. Игра сохраняется автоматически и продолжает работать, пока вас нет (до 4 часов).</p>`,
       [{ label: 'Начать', primary: true }],
     );
   }

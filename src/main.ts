@@ -1,7 +1,7 @@
 import './style.css';
 import * as core from './core';
 import { createDemoState } from './demo';
-import { Game } from './game';
+import { Game, isPipeTool } from './game';
 import { Camera, worldToTile } from './render/iso';
 import { Renderer } from './render/renderer';
 import { duration, money, num } from './ui/format';
@@ -11,10 +11,16 @@ const canvas = document.getElementById('game') as HTMLCanvasElement;
 const camera = new Camera();
 const renderer = new Renderer(canvas, camera);
 
+/** Версия сохранения до загрузки: по ней показываем пояснение о переходе на сеть трубопроводов. */
+let loadedVersion = core.SAVE_VERSION;
+
 function loadSave(): core.GameState | null {
   try {
     const raw = localStorage.getItem(core.SAVE_KEY);
-    return raw ? core.deserialize(raw) : null;
+    if (!raw) return null;
+    const v = (JSON.parse(raw) as { version?: unknown }).version;
+    if (typeof v === 'number') loadedVersion = v;
+    return core.deserialize(raw);
   } catch {
     return null;
   }
@@ -55,6 +61,18 @@ renderer.adopt(game.state);
 camera.centerOnTile(core.HQ_POS.x + 3, core.HQ_POS.y + 3);
 
 if (loaded) {
+  if (loadedVersion < 2) {
+    hud.modal(
+      'Появились трубопроводы',
+      `<p>Теперь нефть идёт от качалок к хранилищам только по трубам, а у каждой трубы есть пропускная способность.</p>
+       <p>Ваши деньги, нефть, здания и земля сохранены. Все качалки, резервуары и терминалы бесплатно подключены
+       магистральными трубами по вашей земле. Нефть со склада разложена по хранилищам.</p>
+       <p class="small">Если какие-то качалки отмечены значком ≈, их ограничивает труба: выберите качалку — узкое место
+       будет подсвечено. Помогут вторая ветка к другому резервуару, резервуар с терминалом рядом с промыслом
+       или отдельная сеть. Инструменты: 4 — труба, 5 — магистраль, X — демонтаж.</p>`,
+      [{ label: 'Понятно', primary: true }],
+    );
+  }
   runOffline((Date.now() - loaded.savedAt) / 1000, 'Пока вас не было');
 } else if (!demo) {
   hud.showHelp();
@@ -103,8 +121,17 @@ function tileAtScreen(sx: number, sy: number): { x: number; y: number } {
 
 let drag: { x: number; y: number; button: number; moved: boolean } | null = null;
 
+/** Протяжка трубы левой кнопкой: камера при этом не двигается. */
+let pipeDrag = false;
+
 canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture(e.pointerId);
+  if (e.button === 0 && isPipeTool(game.mode)) {
+    const t = tileAtScreen(e.clientX, e.clientY);
+    game.pipeDown(t.x, t.y);
+    pipeDrag = true;
+    return;
+  }
   drag = { x: e.clientX, y: e.clientY, button: e.button, moved: false };
 });
 
@@ -125,6 +152,13 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 canvas.addEventListener('pointerup', (e) => {
+  if (pipeDrag && e.button === 0) {
+    pipeDrag = false;
+    const t = tileAtScreen(e.clientX, e.clientY);
+    game.pipeUp(t.x, t.y);
+    hud.update();
+    return;
+  }
   if (drag && !drag.moved) {
     if (drag.button === 0) {
       const t = tileAtScreen(e.clientX, e.clientY);
@@ -161,6 +195,9 @@ window.addEventListener('keydown', (e) => {
   else if (key === '1') game.setMode('pumpjack');
   else if (key === '2') game.setMode('tank');
   else if (key === '3') game.setMode('terminal');
+  else if (key === '4') game.setMode('pipe');
+  else if (key === '5') game.setMode('trunk');
+  else if (key === 'x' || key === 'ч') game.setMode('unpipe');
   else if (key === 's' || key === 'ы') game.sell();
   else if (key === ' ') {
     e.preventDefault();
@@ -212,7 +249,9 @@ function frame(now: number): void {
   if (held.has('arrowup')) camera.y -= pan;
   if (held.has('arrowdown')) camera.y += pan;
 
-  const ghost = game.mode && game.hover ? { type: game.mode, ok: core.canBuild(game.state, game.mode, game.hover.x, game.hover.y).ok } : null;
+  const building = game.mode && !isPipeTool(game.mode) ? game.mode : null;
+  const ghost = building && game.hover ? { type: building, ok: core.canBuild(game.state, building, game.hover.x, game.hover.y).ok } : null;
+  const preview = game.pipePreview();
   const sel = game.selection;
   let highlightParcel = sel?.kind === 'parcel' ? { px: sel.px, py: sel.py } : null;
   if (!highlightParcel && !game.mode && game.hover && !core.isTileOwned(game.state, game.hover.x, game.hover.y)) {
@@ -220,7 +259,16 @@ function frame(now: number): void {
   }
   renderer.draw(
     game.state,
-    { hover: game.hover, ghost, selectedBuilding: sel?.kind === 'building' ? sel.id : null, highlightParcel },
+    {
+      hover: game.hover,
+      ghost,
+      selectedBuilding: sel?.kind === 'building' ? sel.id : null,
+      highlightParcel,
+      pipePlan: preview ? { tiles: preview.path, ok: preview.ok, remove: preview.tool === 'unpipe' } : null,
+      // Слой сети: при работе с трубами, выборе трубы и выборе здания сети.
+      network: isPipeTool(game.mode) ? 'full' : sel?.kind === 'pipe' || sel?.kind === 'building' ? 'selection' : null,
+      selectedPipe: sel?.kind === 'pipe' ? { x: sel.x, y: sel.y } : null,
+    },
     dt,
     game.speed,
   );

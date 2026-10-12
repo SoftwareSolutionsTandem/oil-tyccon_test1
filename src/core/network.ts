@@ -50,8 +50,19 @@ export interface FlowInfo {
   demand: Float32Array;
   /** Фактический поток, барр./с. */
   actual: Float32Array;
-  /** По качалке: желаемый и фактический поток, барр./с, и ограничивающая клетка трубы (если есть). */
-  pumps: Map<number, { want: number; actual: number; bottleneck: number }>;
+  /**
+   * По качалке или терминалу (id здания): желаемый и фактический поток, барр./с, ограничивающая клетка трубы
+   * (−1 — нет), фактический маршрут и хранилище на его конце.
+   */
+  clients: Map<number, ClientFlow>;
+}
+
+export interface ClientFlow {
+  want: number;
+  actual: number;
+  bottleneck: number;
+  path: number[];
+  storage: number;
 }
 
 const SIDES = [1, -1, 0, 0];
@@ -275,35 +286,162 @@ function rateOf(b: Building, reserve: number, initial: number): number {
 
 const free = (b: Building) => Math.max(0, levelSpec(b).value - (b.stored ?? 0));
 
+/** Сколько раундов перераспределения за тик: остаток спроса уходит к следующему по дальности хранилищу. */
+const ROUNDS = 4;
+
+interface Client {
+  b: Building;
+  /** Достижимые хранилища по возрастанию длины пути. */
+  list: Array<{ storage: Building; path: number[] }>;
+  /** Сколько ещё нужно перекачать за этот тик, барр. */
+  need: number;
+  /** Желаемый поток, барр./с. */
+  want: number;
+  moved: number;
+  /** Ограничивающая клетка первого раунда (−1 — нет) и упирался ли поток в трубы. */
+  bottleneck: number;
+  piped: boolean;
+  firstPath: number[] | null;
+  firstStorage: number;
+  /** Сколько перекачано в каждое хранилище (из каждого — для терминала). */
+  deliveries: Map<Building, number>;
+}
+
 /**
- * Один шаг логистики: добыча через сеть и продажа через терминалы.
- * Все ограничения применяются пропорционально ко всем, кто делит трубу или хранилище, — результат не зависит
- * от порядка обхода зданий. Добытое ровно равно убыли запасов и ровно попадает в хранилища.
+ * Пропорциональное распределение за несколько раундов. В каждом раунде каждый клиент берёт ближайшее хранилище,
+ * где ещё есть что взять (room), поток ограничивается остатком пропускной способности самой загруженной трубы
+ * пути и долей хранилища; все применяются одновременно. Результат не зависит от порядка клиентов.
+ */
+function allocate(
+  clients: Client[],
+  room: Map<Building, number>,
+  spare: Map<number, number>,
+  cap: (tile: number) => number,
+  info: FlowInfo,
+  dt: number,
+): void {
+  for (let round = 0; round < ROUNDS; round++) {
+    const active: Array<{ c: Client; to: Building; path: number[]; amount: number }> = [];
+    for (const c of clients) {
+      if (c.need <= 1e-9) continue;
+      // Ближайшее хранилище, где есть место (нефть) и путь к которому ещё не забит: так поток обходит
+      // перегруженную трубу по другой ветке сети, если она есть.
+      const to = c.list.find((r) => (room.get(r.storage) ?? 0) > 1e-9 && r.path.every((t) => (spare.has(t) ? spare.get(t)! : cap(t) * dt) > 1e-9));
+      if (!to) continue;
+      active.push({ c, to: to.storage, path: to.path, amount: c.need });
+      if (round === 0) {
+        c.firstPath = to.path;
+        c.firstStorage = to.storage.id;
+      }
+    }
+    if (!active.length) return;
+    // Нагрузка труб в этом раунде и масштаб по самому узкому месту пути.
+    const load = new Map<number, number>();
+    for (const a of active) for (const t of a.path) load.set(t, (load.get(t) ?? 0) + a.amount);
+    if (round === 0) for (const [t, v] of load) info.demand[t] += v / dt;
+    for (const a of active) {
+      let k = 1;
+      let worst = -1;
+      for (const t of a.path) {
+        const left = spare.has(t) ? spare.get(t)! : cap(t) * dt;
+        const q = left / load.get(t)!;
+        if (q < k) {
+          k = q;
+          worst = t;
+        }
+      }
+      a.amount *= Math.max(0, k);
+      if (worst >= 0 && k < 0.999) {
+        a.c.piped = true;
+        if (a.c.bottleneck < 0) a.c.bottleneck = worst;
+      }
+    }
+    // Доля хранилища: если просят больше, чем есть места (нефти), — пропорционально.
+    const asked = new Map<Building, number>();
+    for (const a of active) asked.set(a.to, (asked.get(a.to) ?? 0) + a.amount);
+    let movedAny = false;
+    for (const a of active) {
+      const req = asked.get(a.to)!;
+      if (req > 0) a.amount *= Math.min(1, room.get(a.to)! / req);
+    }
+    for (const a of active) {
+      if (a.amount <= 0) continue;
+      movedAny = true;
+      room.set(a.to, Math.max(0, room.get(a.to)! - a.amount));
+      a.c.need -= a.amount;
+      a.c.moved += a.amount;
+      a.c.deliveries.set(a.to, (a.c.deliveries.get(a.to) ?? 0) + a.amount);
+      for (const t of a.path) {
+        spare.set(t, Math.max(0, (spare.has(t) ? spare.get(t)! : cap(t) * dt) - a.amount));
+        info.actual[t] += a.amount / dt;
+      }
+    }
+    if (!movedAny) return;
+  }
+}
+
+/**
+ * Один шаг логистики. Сначала терминалы забирают нефть из хранилищ (освобождая место), затем качалки качают
+ * в хранилища. Пропускная способность трубы за тик общая: сначала её занимает отгрузка, остаток — добыча.
+ * Добытое ровно равно убыли запасов месторождений и ровно попадает в хранилища; проданное ровно уходит из них.
  */
 export function stepLogistics(s: GameState, dt: number, price: number, priceOk: boolean): { produced: number; sold: number; revenue: number } {
   const net = getNetwork(s);
   const total = s.map.size * s.map.size;
   let info = flows.get(s);
   if (!info || info.demand.length !== total) {
-    info = { demand: new Float32Array(total), actual: new Float32Array(total), pumps: new Map() };
+    info = { demand: new Float32Array(total), actual: new Float32Array(total), clients: new Map() };
     flows.set(s, info);
   }
   info.demand.fill(0);
   info.actual.fill(0);
-  info.pumps.clear();
+  info.clients.clear();
+  const spare = new Map<number, number>();
+  const cap = (t: number) => pipeCapacity(s.map.pipes[t]);
+  const client = (b: Building, want: number): Client => ({
+    b,
+    list: net.reach.get(b.id)!,
+    need: want * dt,
+    want,
+    moved: 0,
+    bottleneck: -1,
+    piped: false,
+    firstPath: null,
+    firstStorage: -1,
+    deliveries: new Map(),
+  });
+  const record = (c: Client) =>
+    info!.clients.set(c.b.id, {
+      want: c.want,
+      actual: c.moved / dt,
+      bottleneck: c.piped ? c.bottleneck : -1,
+      path: c.firstPath ?? [],
+      storage: c.firstStorage,
+    });
 
-  interface Flow {
-    b: Building;
-    target: Building;
-    path: number[];
-    /** Желаемый поток, барр./с. */
-    want: number;
-    scale: number;
-    bottleneck: number;
-    tiles?: number[];
+  // 1. Отгрузка через терминалы.
+  const terms: Client[] = [];
+  for (const b of s.buildings) {
+    if (b.type !== 'terminal') continue;
+    if (!b.enabled) b.status = 'off';
+    else if (!net.reach.has(b.id)) b.status = 'no_route';
+    else if (!priceOk) b.status = 'waiting_price';
+    else terms.push(client(b, levelSpec(b).value));
   }
-  // 1. Качалки: ближайшее достижимое хранилище со свободным местом.
-  const pumps: Flow[] = [];
+  const oil = new Map<Building, number>();
+  for (const st of s.buildings) if (isStorage(st)) oil.set(st, st.stored ?? 0);
+  allocate(terms, oil, spare, cap, info, dt);
+  let sold = 0;
+  for (const c of terms) {
+    sold += c.moved;
+    const oilLeft = c.list.some((r) => (oil.get(r.storage) ?? 0) > 1e-6);
+    c.b.status = c.need <= 1e-6 ? 'ok' : c.piped && oilLeft ? 'throttled' : c.moved <= 1e-9 ? 'no_oil' : 'ok';
+    record(c);
+  }
+  for (const c of terms) for (const [st, v] of c.deliveries) st.stored = Math.max(0, (st.stored ?? 0) - v);
+
+  // 2. Добыча: качалки качают в хранилища со свободным местом.
+  const pumps: Array<Client & { tiles: number[]; pool: number }> = [];
   for (const b of s.buildings) {
     if (b.type !== 'pumpjack') continue;
     const tiles = net.drainage.get(b.id)!;
@@ -313,94 +451,37 @@ export function stepLogistics(s: GameState, dt: number, price: number, priceOk: 
       pool += s.map.reserve[i];
       initial += s.map.initial[i];
     }
-    if (pool <= 0) {
-      b.status = 'depleted';
-      continue;
-    }
-    if (!b.enabled) {
-      b.status = 'off';
-      continue;
-    }
-    const list = net.reach.get(b.id);
-    if (!list) {
-      b.status = 'no_route';
-      continue;
-    }
-    const to = list.find((r) => free(r.storage) > 1e-9);
-    if (!to) {
-      b.status = 'full';
-      continue;
-    }
-    pumps.push({ b, target: to.storage, path: to.path, want: Math.min(pool / dt, rateOf(b, pool, initial)), scale: 1, bottleneck: -1, tiles });
+    if (pool <= 0) b.status = 'depleted';
+    else if (!b.enabled) b.status = 'off';
+    else if (!net.reach.has(b.id)) b.status = 'no_route';
+    else pumps.push({ ...client(b, Math.min(pool / dt, rateOf(b, pool, initial))), tiles, pool });
   }
-  // 2. Терминалы: ближайшее хранилище, где есть нефть.
-  const terms: Flow[] = [];
-  for (const b of s.buildings) {
-    if (b.type !== 'terminal') continue;
-    const list = net.reach.get(b.id);
-    if (!b.enabled) b.status = 'off';
-    else if (!list) b.status = 'no_route';
-    else if (!priceOk) b.status = 'waiting_price';
-    else {
-      const from = list.find((r) => (r.storage.stored ?? 0) > 1e-9);
-      if (!from) b.status = 'no_oil';
-      else terms.push({ b, target: from.storage, path: from.path, want: levelSpec(b).value, scale: 1, bottleneck: -1 });
-    }
-  }
-  // 3. Нагрузка труб и узкие места: каждый поток ограничен самой перегруженной трубой своего пути.
-  const all = [...pumps, ...terms];
-  for (const f of all) for (const t of f.path) info.demand[t] += f.want;
-  for (const f of all) {
-    for (const t of f.path) {
-      const cap = pipeCapacity(s.map.pipes[t]);
-      const k = info.demand[t] > cap ? cap / info.demand[t] : 1;
-      if (k < f.scale) {
-        f.scale = k;
-        f.bottleneck = t;
-      }
-    }
-  }
-  // 4. Свободное место хранилища делится между качалками, которые в него качают.
-  const into = new Map<Building, number>();
-  for (const f of pumps) into.set(f.target, (into.get(f.target) ?? 0) + f.want * f.scale * dt);
+  const room = new Map<Building, number>();
+  for (const st of s.buildings) if (isStorage(st)) room.set(st, free(st));
+  allocate(pumps, room, spare, cap, info, dt);
   let produced = 0;
-  for (const f of pumps) {
-    const req = into.get(f.target)!;
-    const sh = req > 0 ? Math.min(1, free(f.target) / req) : 1;
-    const target = f.want * f.scale * sh * dt;
-    const pool = f.tiles!.reduce((sum, i) => sum + s.map.reserve[i], 0);
+  for (const c of pumps) {
+    // Извлечение из зоны дренирования пропорционально запасам клеток; ровно столько, сколько принято хранилищами.
     let got = 0;
-    if (pool > 0) {
-      for (const i of f.tiles!) {
-        const take = Math.min(s.map.reserve[i], (target * s.map.reserve[i]) / pool);
+    // Запас перечитывается: клетку могла уже частично выкачать соседняя скважина в этом тике.
+    const pool = c.tiles.reduce((sum, i) => sum + s.map.reserve[i], 0);
+    if (c.moved > 0 && pool > 0) {
+      for (const i of c.tiles) {
+        const take = Math.min(s.map.reserve[i], (c.moved * s.map.reserve[i]) / pool);
         s.map.reserve[i] -= take;
         got += take;
       }
     }
-    (f as Flow & { got: number }).got = got;
+    // Зачисляется ровно добытое (got может отличаться от moved на погрешность округления).
+    const k = c.moved > 0 ? got / c.moved : 0;
+    for (const [st, v] of c.deliveries) st.stored = (st.stored ?? 0) + v * k;
+    c.moved = got;
     produced += got;
-    const rate = got / dt;
-    for (const t of f.path) info.actual[t] += rate;
-    info.pumps.set(f.b.id, { want: f.want, actual: rate, bottleneck: f.scale < 0.999 ? f.bottleneck : -1 });
-    f.b.status = f.scale < 0.999 ? 'throttled' : sh < 0.999 ? 'full' : 'ok';
+    // Недобор из-за трубы — только если в достижимых хранилищах осталось место; иначе причина — заполненный склад.
+    const roomLeft = c.list.some((r) => (room.get(r.storage) ?? 0) > 1e-6);
+    c.b.status = c.need <= 1e-6 * Math.max(1, c.want) ? 'ok' : c.piped && roomLeft ? 'throttled' : 'full';
+    record(c);
   }
-  // Зачисление после расчёта долей — порядок качалок не влияет на результат.
-  for (const f of pumps) f.target.stored = (f.target.stored ?? 0) + (f as Flow & { got: number }).got;
-  // 5. Терминалы забирают нефть; если несколько тянут из одного хранилища — пропорционально.
-  const outOf = new Map<Building, number>();
-  for (const f of terms) outOf.set(f.target, (outOf.get(f.target) ?? 0) + f.want * f.scale * dt);
-  let sold = 0;
-  const taken = new Map<Building, number>();
-  for (const f of terms) {
-    const req = outOf.get(f.target)!;
-    const sh = req > 0 ? Math.min(1, (f.target.stored ?? 0) / req) : 1;
-    const amount = f.want * f.scale * sh * dt;
-    taken.set(f.target, (taken.get(f.target) ?? 0) + amount);
-    sold += amount;
-    for (const t of f.path) info.actual[t] += amount / dt;
-    f.b.status = f.scale < 0.999 ? 'throttled' : 'ok';
-  }
-  for (const [st, amount] of taken) st.stored = Math.max(0, (st.stored ?? 0) - amount);
   syncOil(s);
   return { produced, sold, revenue: sold * price };
 }
