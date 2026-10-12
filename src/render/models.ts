@@ -69,7 +69,14 @@ export function pumpjack(p: ModelPainter, level: number, phase: number): void {
   p.obox(W(tail, 0, (0.14 + shaftZ + 0.06) / 2), mul(E, 0.11 * k), mul(F, 0.1), mul(Z, (shaftZ + 0.06 - 0.14) / 2), paint);
   p.tube(W(tail, -0.16, shaftZ), W(tail, 0.16, shaftZ), 0.028, M.steel, 10);
   p.obox(W(motorS, 0, 0.13), mul(E, 0.08), mul(F, 0.09), mul(Z, 0.03), M.steelDark);
-  p.tube(W(motorS, -0.08, 0.23), W(motorS, 0.08, 0.23), 0.06, mat([84, 96, 104], 0.3, 20), 14);
+  if (level === 1) {
+    // Старые станки — с газовым двигателем: блок цилиндров и выхлопная труба.
+    p.obox(W(motorS, 0, 0.23), mul(E, 0.07), mul(F, 0.08), mul(Z, 0.07), mat([92, 86, 72], 0.25, 16));
+    const ex = pumpExhaust(level)!;
+    p.tube([ex[0], ex[1], 0.28], ex, 0.013, M.steelDark, 6);
+  } else {
+    p.tube(W(motorS, -0.08, 0.23), W(motorS, 0.08, 0.23), 0.06, mat([84, 96, 104], 0.3, 20), 14);
+  }
 
   // Балансир, «голова лошади», траверса и опорный подшипник.
   p.obox(W(0, 0, H - 0.04), mul(E, 0.05), mul(F, 0.05), mul(Z, 0.03), M.steelDark);
@@ -86,6 +93,13 @@ export function pumpjack(p: ModelPainter, level: number, phase: number): void {
   p.tube(pin(0.15), tailPt(0.11), 0.016, paint, 8);
   crank(p, 0.14, tail, shaftZ, crankR, phase, k, paintDark);
   p.obox(W((tail + motorS) / 2, 0.17, 0.24), mul(E, (motorS - tail) / 2 + 0.05), mul(F, 0.014), mul(Z, 0.075), paint);
+}
+
+/** Верх выхлопной трубы газового двигателя (только у качалки 1-го уровня) — точка испускания выхлопа. */
+export function pumpExhaust(level: number): V3 | null {
+  if (level !== 1) return null;
+  const k = 0.9;
+  return W(0.36 * k + 0.25 * k + 0.03, -0.05, 0.44);
 }
 
 function xy(v: V3): [number, number] {
@@ -275,6 +289,26 @@ export function terminalFront(p: ModelPainter, level: number): void {
   }
 }
 
+/** Верх выхлопной трубы бензовоза и точка за задними колёсами (откуда летит пыль), в координатах модели. */
+export const TRUCK_EXHAUST: V3 = [0.47, 0.6, 0.38];
+/** Габарит бензовоза по оси x: зеркальная модель — x → TRUCK_LENGTH − x. */
+export const TRUCK_LENGTH = 0.65;
+export const TRUCK_DUST: V3 = [0.04, 0.7, 0.02];
+
+/** Бензовоз, развёрнутый кабиной к −x (для выезда назад). Зеркалим по x: передние/задние детали меняются местами. */
+export function truckReverse(p: ModelPainter): void {
+  const X = (x: number) => TRUCK_LENGTH - x;
+  for (const x of [0.1, 0.21, 0.5]) p.tube([X(x), 0.6, 0.06], [X(x), 0.64, 0.06], 0.058, M.rubber, 10);
+  p.box(X(0.6), 0.62, 0.07, X(0.02), 0.78, 0.12, M.steelDark);
+  p.box(X(0.63), 0.6, 0.07, X(0.6), 0.8, 0.12, M.steel);
+  p.box(X(0.61), 0.6, 0.08, X(0.47), 0.8, 0.3, M.red);
+  p.face([[X(0.58), 0.801, 0.19], [X(0.5), 0.801, 0.19], [X(0.5), 0.801, 0.28], [X(0.58), 0.801, 0.28]], M.glass, [0, 1, 0]);
+  p.tube([X(0.47), 0.6, 0.12], [X(0.47), 0.6, 0.38], 0.012, M.steel, 6);
+  p.tube([X(0.45), 0.7, 0.23], [X(0.03), 0.7, 0.23], 0.11, M.aluminium, 18);
+  p.box(X(0.42), 0.67, 0.33, X(0.06), 0.73, 0.345, M.steelDark);
+  for (const x of [0.1, 0.21, 0.5]) p.tube([X(x), 0.78, 0.06], [X(x), 0.82, 0.06], 0.058, M.rubber, 10);
+}
+
 /** Бензовоз, ориентирован вдоль оси x. */
 export function truck(p: ModelPainter): void {
   for (const x of [0.1, 0.21, 0.5]) p.tube([x, 0.6, 0.06], [x, 0.64, 0.06], 0.058, M.rubber, 10);
@@ -285,7 +319,7 @@ export function truck(p: ModelPainter): void {
   p.face([[0.611, 0.63, 0.19], [0.611, 0.77, 0.19], [0.611, 0.77, 0.28], [0.611, 0.63, 0.28]], M.glass, [1, 0, 0]);
   p.face([[0.5, 0.801, 0.19], [0.58, 0.801, 0.19], [0.58, 0.801, 0.28], [0.5, 0.801, 0.28]], M.glass, [0, 1, 0]);
   p.box(0.6, 0.6, 0.07, 0.63, 0.8, 0.12, M.steel);
-  p.tube([0.47, 0.6, 0.12], [0.47, 0.6, 0.38], 0.012, M.steel, 6);
+  p.tube([0.47, 0.6, 0.12], TRUCK_EXHAUST, 0.012, M.steel, 6);
   for (const x of [0.1, 0.21, 0.5]) p.tube([x, 0.78, 0.06], [x, 0.82, 0.06], 0.058, M.rubber, 10);
 }
 

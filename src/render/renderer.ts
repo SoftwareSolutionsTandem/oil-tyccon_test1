@@ -11,7 +11,8 @@ import {
 import { GroundDecals } from './ground';
 import { Camera, isoX, isoY } from './iso';
 import { proj, SPRITE_SCALE, ZPX, type ShadowShape, type Sprite } from './model';
-import { HQ_FLAG_TOP, tankGauge } from './models';
+import { HQ_FLAG_TOP, pumpExhaust, tankGauge, TRUCK_DUST, TRUCK_EXHAUST, TRUCK_LENGTH } from './models';
+import { ParticleSystem } from './particles';
 import { createCanvas, hash2 } from './noise';
 import { SpriteLibrary } from './sprites';
 import { makeStains, TEX, TerrainLayer } from './terrain';
@@ -68,10 +69,15 @@ export class Renderer {
   private clock = 0;
   private pumpPhase = new Map<number, number>();
   private truckT = new Map<number, number>();
+  /** Направление выезда машин (обновляется раз в кадр по соседним зданиям). */
+  private exitDirs = new Map<number, 1 | -1 | 0>();
   private terminalCash = new Map<number, number>();
   private bornAt = new Map<number, number>();
   private floats: FloatText[] = [];
   private hqTrucks: number[] = [];
+  readonly particles = new ParticleSystem();
+  /** Сглаженная длительность реального кадра — по ней снижается интенсивность частиц на слабых устройствах. */
+  private avgFrame = 1 / 60;
   /** Время отрисовки последнего кадра, мс (для отладки производительности). */
   frameMs = 0;
 
@@ -138,14 +144,22 @@ export class Renderer {
     this.drawSlab(s);
     this.drawGround(s, view);
 
+    this.avgFrame += (dt - this.avgFrame) * 0.05;
+    // Медленнее 30 и 20 кадров/с — испускаем меньше частиц.
+    this.particles.quality = this.avgFrame > 0.05 ? 0.35 : this.avgFrame > 0.034 ? 0.6 : 1;
     for (const b of s.buildings) {
       if (!this.bornAt.has(b.id)) this.bornAt.set(b.id, this.clock);
+      if (b.type === 'terminal' || b.type === 'hq') this.exitDirs.set(b.id, this.exitDir(s, b));
       this.animate(b, simDt);
     }
+    this.particles.update(simDt);
     const items = this.collectItems(s, view);
     this.drawShadows(items);
+    // Пыль у земли сортируется по глубине вместе с объектами.
+    this.particles.forEachAlive(0, (i, depth) => items.push({ order: depth + 0.3, draw: () => this.particles.drawOne(ctx, i) }));
     items.sort((a, b) => a.order - b.order);
     for (const it of items) it.draw();
+    this.particles.draw(ctx, 1); // дым и выхлоп поднимаются над объектами
 
     this.drawFloats(dt);
     this.frameMs = performance.now() - t0;
@@ -509,7 +523,7 @@ export class Renderer {
           return;
         }
         const truck = b.type === 'terminal' ? this.truckOffset(b) : null;
-        if (truck && truck.dx > 0) this.castShadow(this.sprites.truck().shadows, b.x + truck.dx, b.y);
+        if (truck && truck.dx !== 0) this.castShadow(this.truckSprite(truck.dir).shadows, b.x + truck.dx, b.y);
       },
     };
   }
@@ -547,7 +561,7 @@ export class Renderer {
             if (!truck) return;
             this.ctx.save();
             this.ctx.globalAlpha *= truck.alpha;
-            this.blit(lib.truck(), x + truck.dx, y);
+            this.blit(this.truckSprite(truck.dir), x + truck.dx, y);
             this.ctx.restore();
           },
           () => this.blit(lib.terminalFront(b.level), x, y),
@@ -556,30 +570,55 @@ export class Renderer {
     }
   }
 
-  private truckOffset(b: Building): { dx: number; alpha: number } | null {
-    if (b.id < 0) return { dx: 0, alpha: 1 };
+  /**
+   * Куда уезжает машина от здания: вдоль оси x туда, где две клетки свободны от зданий
+   * (сначала вперёд, иначе назад); если заперта с обеих сторон — растворяется на месте.
+   */
+  private exitDir(s: GameState, b: Building): 1 | -1 | 0 {
+    const free = (x: number) => x >= 0 && x < s.map.size && !s.buildings.some((o) => o.x === x && o.y === b.y);
+    if (free(b.x + 1) && free(b.x + 2)) return 1;
+    if (free(b.x - 1) && free(b.x - 2)) return -1;
+    return 0;
+  }
+
+  private truckOffset(b: Building): { dx: number; alpha: number; dir: 1 | -1 } | null {
+    const dir = this.exitDirs.get(b.id) ?? 1;
+    if (b.id < 0) return { dx: 0, alpha: 1, dir: 1 };
     const t = this.truckT.get(b.id) ?? 0;
-    if (t < TRUCK_LOAD) return { dx: 0, alpha: 1 };
+    if (t < TRUCK_LOAD) return { dx: 0, alpha: 1, dir: dir === -1 ? -1 : 1 };
     const k = (t - TRUCK_LOAD) / (1 - TRUCK_LOAD);
     if (k > 0.98) return null;
-    return { dx: k * k * 2.4, alpha: Math.min(1, (1 - k) * 2.5) };
+    if (dir === 0) return { dx: 0, alpha: Math.max(0, 1 - k * 3), dir: 1 };
+    return { dx: dir * k * k * 2.4, alpha: Math.min(1, (1 - k) * 2.5), dir };
+  }
+
+  private truckSprite(dir: 1 | -1): Sprite {
+    return dir === 1 ? this.sprites.truck() : this.sprites.truckReverse();
   }
 
   private hqTrucksItem(b: Building): DrawItem {
     this.hqTrucks = this.hqTrucks.filter((start) => this.clock - start < 2.5);
-    const trucks = this.hqTrucks.map((start) => (this.clock - start) / 2.5);
+    const dir = this.exitDirs.get(b.id) ?? 1;
+    // Грузовик перекупщика: уезжает по свободной стороне или растворяется у конторы.
+    const trucks = this.hqTrucks.map((start) => {
+      const k = (this.clock - start) / 2.5;
+      const sprite = this.truckSprite(dir === -1 ? -1 : 1);
+      const x = dir === 0 ? b.x + 0.4 : b.x + 0.4 * dir + dir * k * k * 3;
+      const alpha = dir === 0 ? Math.max(0, 1 - k * 3) : Math.min(1, (1 - k) * 2.5);
+      return { sprite, x, alpha };
+    });
     return {
       order: b.x + b.y + 1.2,
       draw: () => {
-        for (const k of trucks) {
+        for (const t of trucks) {
           this.ctx.save();
-          this.ctx.globalAlpha = Math.min(1, (1 - k) * 2.5);
-          this.blit(this.sprites.truck(), b.x + 0.4 + k * k * 3, b.y + 0.35);
+          this.ctx.globalAlpha = t.alpha;
+          this.blit(t.sprite, t.x, b.y + 0.35);
           this.ctx.restore();
         }
       },
       shadows: () => {
-        for (const k of trucks) this.castShadow(this.sprites.truck().shadows, b.x + 0.4 + k * k * 3, b.y + 0.35);
+        for (const t of trucks) this.castShadow(t.sprite.shadows, t.x, b.y + 0.35);
       },
     };
   }
@@ -591,8 +630,18 @@ export class Renderer {
 
   private animate(b: Building, simDt: number): void {
     if (b.type === 'pumpjack' && b.status === 'ok') {
-      this.pumpPhase.set(b.id, (this.pumpPhase.get(b.id) ?? hash2(b.x, b.y, 1) * 6) + simDt * (1.7 + 0.35 * b.level));
+      const before = this.pumpPhase.get(b.id) ?? hash2(b.x, b.y, 1) * 6;
+      const after = before + simDt * (1.7 + 0.35 * b.level);
+      this.pumpPhase.set(b.id, after);
+      const ex = pumpExhaust(b.level);
+      if (ex && simDt > 0) {
+        const at: [number, number, number] = [b.x + ex[0], b.y + ex[1], ex[2]];
+        // Газовый двигатель: тонкий постоянный выхлоп и клуб на каждом ходе (два на оборот кривошипа).
+        this.particles.emit(1, at, 1.5, simDt, { size: 1.8, alpha: 0.7 });
+        if (Math.floor(after / Math.PI) !== Math.floor(before / Math.PI)) this.particles.spawn(1, at, { size: 2.4, alpha: 0.9 });
+      }
     }
+    if (b.type === 'hq') this.emitHqTrucks(b, simDt);
     if (b.type === 'terminal') {
       let t = this.truckT.get(b.id) ?? 0;
       const moving = t >= TRUCK_LOAD;
@@ -605,6 +654,34 @@ export class Renderer {
         this.terminalCash.set(b.id, 0);
       }
       this.truckT.set(b.id, t);
+      const truck = this.truckOffset(b);
+      if (truck && simDt > 0) {
+        const moving = t >= TRUCK_LOAD;
+        const speed = moving ? (t - TRUCK_LOAD) / (1 - TRUCK_LOAD) : 0;
+        const dust = truckPoint(TRUCK_DUST, truck.dir);
+        const exhaust = truckPoint(TRUCK_EXHAUST, truck.dir);
+        if (moving && truck.dx !== 0) this.particles.emit(0, [b.x + truck.dx + dust[0], b.y + dust[1], dust[2]], 10 + 40 * speed, simDt, { vx: -0.3 * truck.dir });
+        if (moving || b.status === 'ok') {
+          this.particles.emit(1, [b.x + truck.dx + exhaust[0], b.y + exhaust[1], exhaust[2]], moving ? 7 : 2, simDt);
+        }
+      }
+    }
+  }
+
+  /** Пыль и выхлоп грузовиков перекупщика, уезжающих от конторы. */
+  private emitHqTrucks(b: Building, simDt: number): void {
+    if (simDt <= 0) return;
+    const dir = this.exitDirs.get(b.id) ?? 1;
+    if (dir === 0) return;
+    const dust = truckPoint(TRUCK_DUST, dir);
+    const exhaust = truckPoint(TRUCK_EXHAUST, dir);
+    for (const start of this.hqTrucks) {
+      const k = (this.clock - start) / 2.5;
+      if (k < 0 || k >= 1) continue;
+      const x = b.x + 0.4 * dir + dir * k * k * 3;
+      const y = b.y + 0.35;
+      this.particles.emit(0, [x + dust[0], y + dust[1], dust[2]], 15 + 40 * k, simDt, { vx: -0.3 * dir });
+      this.particles.emit(1, [x + exhaust[0], y + exhaust[1], exhaust[2]], 7, simDt);
     }
   }
 
@@ -792,4 +869,9 @@ function bakeShadow(shapes: ShadowShape[]): ShadowSprite {
     }
   }
   return { canvas, ox, oy, w, h };
+}
+
+/** Точка на модели бензовоза с учётом разворота (зеркально по x относительно кузова). */
+function truckPoint(p: readonly [number, number, number], dir: 1 | -1): [number, number, number] {
+  return dir === 1 ? [p[0], p[1], p[2]] : [TRUCK_LENGTH - p[0], p[1], p[2]];
 }

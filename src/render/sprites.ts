@@ -52,6 +52,10 @@ export class SpriteLibrary {
     return this.get('truck', () => this.bake((p) => models.truck(p), this.grime, 0.35));
   }
 
+  truckReverse(): Sprite {
+    return this.get('truckR', () => this.bake((p) => models.truckReverse(p), this.grime, 0.35));
+  }
+
   headquarters(): Sprite {
     return this.get('hq', () => this.bake((p) => models.headquarters(p), this.grime, 0.4));
   }
