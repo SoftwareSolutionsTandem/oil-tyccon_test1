@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canBuild,
+  pumpOrientAt,
   autoConnect,
   isConnected,
   syncOil,
@@ -314,19 +316,57 @@ describe('прогноз истощения', () => {
 });
 
 describe('расстановка скважин и зона дренирования', () => {
-  it('качалки нельзя ставить вплотную по стороне, по диагонали — можно', () => {
+  it('качалки ставятся рядами бок о бок; ряд не поворачивает и не примыкает к соседнему ряду', () => {
     const s = createNewGame(4);
     s.cash = 1e6;
-    const x = 20;
-    const y = 20;
-    for (const [dx, dy] of [[0, 0], [1, 0], [1, 1], [0, 1]]) {
+    const x = 18;
+    const y = 18;
+    for (let dy = 0; dy < 4; dy++)
+      for (let dx = 0; dx < 4; dx++) {
+        const i = (y + dy) * s.map.size + x + dx;
+        s.map.reserve[i] = s.map.initial[i] = 1000;
+      }
+    // Ряд вдоль x: соседи по стороне разрешены, балансиры разворачиваются поперёк ряда (вдоль y).
+    for (const dx of [0, 1, 2]) expect(build(s, 'pumpjack', x + dx, y).ok).toBe(true);
+    expect(pumpOrientAt(s, x + 1, y)).toBe(2);
+    // Поворот ряда и вплотную примыкающий ряд запрещены — с понятной причиной.
+    const turn = canBuild(s, 'pumpjack', x, y + 1);
+    expect(turn.ok).toBe(false);
+    expect(turn.ok ? '' : turn.reason).toMatch(/проход/);
+    expect(canBuild(s, 'pumpjack', x + 3, y + 1).ok).toBe(true); // по диагонали к концу ряда — можно
+    // Через проход — новый параллельный ряд.
+    for (const dx of [0, 1, 2]) expect(build(s, 'pumpjack', x + dx, y + 2).ok).toBe(true);
+    expect(s.buildings.filter((b) => b.type === 'pumpjack').length).toBe(6);
+    expect(build(s, 'pumpjack', x + 3, y + 2).ok).toBe(true); // продолжение ряда
+  });
+
+  it('ориентация выводится из расстановки; старый сплошной блок отображается по-старому и работает', () => {
+    const s = createNewGame(4);
+    s.cash = 1e6;
+    const x = 18;
+    const y = 18;
+    // Блок 2×2 вплотную из старых сохранений (до правила рядов) — добавлен напрямую.
+    for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
       const i = (y + dy) * s.map.size + x + dx;
       s.map.reserve[i] = s.map.initial[i] = 1000;
+      s.buildings.push({ id: s.nextId++, type: 'pumpjack', x: x + dx, y: y + dy, level: 1, enabled: true, invested: 500, status: 'ok' });
     }
-    expect(build(s, 'pumpjack', x, y).ok).toBe(true);
-    expect(build(s, 'pumpjack', x + 1, y)).toEqual({ ok: false, reason: 'Слишком близко к другой скважине: между ними нужна клетка' });
-    expect(build(s, 'pumpjack', x, y + 1).ok).toBe(false);
-    expect(build(s, 'pumpjack', x + 1, y + 1).ok).toBe(true);
+    for (const b of s.buildings.filter((o) => o.type === 'pumpjack')) expect(pumpOrientAt(s, b.x, b.y)).toBe(0);
+    connectAll(s);
+    run(s, 30);
+    expect(s.buildings.filter((b) => b.type === 'pumpjack').every((b) => b.status === 'ok' || b.status === 'full')).toBe(true);
+    expect(s.totals.produced).toBeGreaterThan(0);
+    // Одиночная качалка — по диагонали, ряд вдоль y — балансир вдоль x.
+    const t = createNewGame(4);
+    t.cash = 1e6;
+    for (const dy of [0, 1]) {
+      const i = (y + dy) * t.map.size + x;
+      t.map.reserve[i] = t.map.initial[i] = 1000;
+    }
+    build(t, 'pumpjack', x, y);
+    expect(pumpOrientAt(t, x, y)).toBe(0);
+    build(t, 'pumpjack', x, y + 1);
+    expect(pumpOrientAt(t, x, y)).toBe(1);
   });
 
   it('скважина тянет нефть из соседних клеток месторождения равномерно', async () => {

@@ -6,12 +6,26 @@ import { MATERIALS as M, mat, proj, type Material, type ModelPainter, type RGB, 
  */
 
 const R2 = Math.SQRT1_2;
-/** Оси «профильной» системы координат: s — вправо по экрану, t — к зрителю. */
-const E: V3 = [R2, -R2, 0];
-const F: V3 = [R2, R2, 0];
+/**
+ * Оси «профильной» системы координат: s — вдоль балансира, t — поперёк (к зрителю).
+ * Ориентация качалки: 0 — балансир по горизонтали экрана (по диагонали клетки), 1 — вдоль оси x карты,
+ * 2 — вдоль оси y карты. Во всех вариантах «голова» дальше от зрителя, чем двигатель, а t смотрит к зрителю,
+ * поэтому порядок рисования «сначала дальние детали» сохраняется.
+ */
+const AXES: Record<number, [V3, V3]> = {
+  0: [[R2, -R2, 0], [R2, R2, 0]],
+  1: [[1, 0, 0], [0, 1, 0]],
+  2: [[0, 1, 0], [1, 0, 0]],
+};
+let E: V3 = AXES[0][0];
+let F: V3 = AXES[0][1];
 const Z: V3 = [0, 0, 1];
 /** Точка в профильной системе относительно центра клетки. */
-const W = (s: number, t: number, z: number): V3 => [0.5 + (s + t) * R2, 0.5 + (t - s) * R2, z];
+const W = (s: number, t: number, z: number): V3 => [0.5 + s * E[0] + t * F[0], 0.5 + s * E[1] + t * F[1], z];
+
+function orient(o: number): void {
+  [E, F] = AXES[o] ?? AXES[0];
+}
 
 export const PUMP_PAINT: RGB[] = [
   [70, 92, 110],
@@ -20,7 +34,8 @@ export const PUMP_PAINT: RGB[] = [
 ];
 
 /** Станок-качалка, вид сбоку с поворотом 45°: балансир идёт горизонтально по экрану. */
-export function pumpjack(p: ModelPainter, level: number, phase: number): void {
+export function pumpjack(p: ModelPainter, level: number, phase: number, o = 0): void {
+  orient(o);
   const k = [0.9, 0.98, 1.08][level - 1] ?? 0.9;
   const paint = mat(PUMP_PAINT[level - 1] ?? PUMP_PAINT[0], 0.32, 22);
   const paintDark = mat((PUMP_PAINT[level - 1] ?? PUMP_PAINT[0]).map((c) => c * 0.7) as unknown as RGB, 0.25, 18);
@@ -72,7 +87,8 @@ export function pumpjack(p: ModelPainter, level: number, phase: number): void {
   if (level === 1) {
     // Старые станки — с газовым двигателем: блок цилиндров и выхлопная труба.
     p.obox(W(motorS, 0, 0.23), mul(E, 0.07), mul(F, 0.08), mul(Z, 0.07), mat([92, 86, 72], 0.25, 16));
-    const ex = pumpExhaust(level)!;
+    const ex = pumpExhaust(level, o)!;
+    orient(o);
     p.tube([ex[0], ex[1], 0.28], ex, 0.013, M.steelDark, 6);
   } else {
     p.tube(W(motorS, -0.08, 0.23), W(motorS, 0.08, 0.23), 0.06, mat([84, 96, 104], 0.3, 20), 14);
@@ -95,9 +111,23 @@ export function pumpjack(p: ModelPainter, level: number, phase: number): void {
   p.obox(W((tail + motorS) / 2, 0.17, 0.24), mul(E, (motorS - tail) / 2 + 0.05), mul(F, 0.014), mul(Z, 0.075), paint);
 }
 
+/** Конец выкидной линии у устья (в клетке, на земле) — сюда подходит труба. */
+export function pumpWellhead(o = 0): [number, number] {
+  orient(o);
+  const p = W(-0.5, -0.27, 0);
+  return [p[0], p[1]];
+}
+
+/** Ось балансира на земле (для площадки под станком). */
+export function pumpAxis(o = 0): [number, number] {
+  orient(o);
+  return [E[0], E[1]];
+}
+
 /** Верх выхлопной трубы газового двигателя (только у качалки 1-го уровня) — точка испускания выхлопа. */
-export function pumpExhaust(level: number): V3 | null {
+export function pumpExhaust(level: number, o = 0): V3 | null {
   if (level !== 1) return null;
+  orient(o);
   const k = 0.9;
   return W(0.36 * k + 0.25 * k + 0.03, -0.05, 0.44);
 }
@@ -142,7 +172,7 @@ function horsehead(p: ModelPainter, H: number, R: number, a: number, k: number, 
   for (let i = 0; i <= steps; i++) plate.push(pt(R, b0 + ((b1 - b0) * i) / steps, 0.05));
   for (let i = steps; i >= 0; i--) plate.push(pt(inner, b0 + ((b1 - b0) * i) / steps, 0.05));
   p.face(plate, m, F);
-  p.shadowPoly(plate.map((q) => [q[0] - 0.05 * R2, q[1] - 0.05 * R2, q[2]] as V3).concat(plate));
+  p.shadowPoly(plate.map((q) => [q[0] - 0.05 * F[0], q[1] - 0.05 * F[1], q[2]] as V3).concat(plate));
 }
 
 /** Геометрия резервуара — нужна и модели, и динамическому указателю уровня. */

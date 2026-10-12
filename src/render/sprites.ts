@@ -32,11 +32,11 @@ export class SpriteLibrary {
     return bakeSprite(draw, { texture, strength });
   }
 
-  pumpjack(level: number, phase: number): Sprite {
+  pumpjack(level: number, phase: number, orient = 0): Sprite {
     const turn = phase / (Math.PI * 2);
     const frame = Math.floor((turn - Math.floor(turn)) * PUMP_FRAMES) % PUMP_FRAMES;
-    return this.get(`pump:${level}:${frame}`, () =>
-      this.bake((p) => models.pumpjack(p, level, (frame / PUMP_FRAMES) * Math.PI * 2), this.grime, 0.45),
+    return this.get(`pump:${level}:${orient}:${frame}`, () =>
+      this.bake((p) => models.pumpjack(p, level, (frame / PUMP_FRAMES) * Math.PI * 2, orient), this.grime, 0.45),
     );
   }
 

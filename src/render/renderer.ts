@@ -1,4 +1,8 @@
 import {
+  canBuild,
+  pumpNeighbors,
+  pumpOrientAt,
+  type PumpOrient,
   drainageTiles,
   getNetwork,
   isTileOwned,
@@ -104,6 +108,11 @@ export class Renderer {
   private dpr = 1;
   private clock = 0;
   private pumpPhase = new Map<number, number>();
+  /** Ориентации качалок без учёта призрака (для анимации поворота) и с учётом (для отрисовки кадра). */
+  private orients = new Map<number, PumpOrient>();
+  private previewOrients = new Map<number, PumpOrient>();
+  private guideKey = '';
+  private guides: Array<[number, number, number]> = [];
   private truckT = new Map<number, number>();
   /** Направление выезда машин (обновляется раз в кадр по соседним зданиям). */
   private exitDirs = new Map<number, 1 | -1 | 0>();
@@ -159,6 +168,8 @@ export class Renderer {
     }
     for (const b of s.buildings) this.bornAt.set(b.id, -Infinity);
     this.pumpPhase.clear();
+    this.orients.clear();
+    this.previewOrients.clear();
     this.truckT.clear();
   }
 
@@ -229,6 +240,7 @@ export class Renderer {
     // При сильном отдалении частицы почти не видны — плавно перестаём их испускать.
     const zoomFade = Math.min(1, Math.max(0, (this.camera.zoom - 0.4) / 0.35));
     this.particles.quality = (this.avgFrame > 0.05 ? 0.35 : this.avgFrame > 0.034 ? 0.6 : 1) * zoomFade;
+    this.updateOrients(s, view);
     for (const b of s.buildings) {
       if (!this.bornAt.has(b.id)) this.bornAt.set(b.id, this.clock);
       if (b.type === 'terminal' || b.type === 'hq') this.exitDirs.set(b.id, this.exitDir(s, b));
@@ -249,6 +261,38 @@ export class Renderer {
 
     this.drawFloats(dt);
     this.frameMs = performance.now() - t0;
+  }
+
+  /**
+   * Ориентации качалок на этот кадр (выводятся из расстановки, см. pumpOrientAt). При размещении качалки
+   * учитывается и призрак — видно, как развернутся соседи. Сменившая ориентацию качалка «подпрыгивает».
+   */
+  private updateOrients(s: GameState, view: ViewState): void {
+    const n = s.map.size;
+    const tiles = new Set<number>();
+    for (const b of s.buildings) if (b.type === 'pumpjack') tiles.add(b.y * n + b.x);
+    const ghost = view.ghost?.type === 'pumpjack' && view.ghost.ok && view.hover ? view.hover : null;
+    if (ghost) tiles.add(ghost.y * n + ghost.x);
+    const at = (x: number, y: number) => x >= 0 && y >= 0 && x < n && y < n && tiles.has(y * n + x);
+    const orientAt = (x: number, y: number): PumpOrient => {
+      const alongX = at(x - 1, y) || at(x + 1, y);
+      const alongY = at(x, y - 1) || at(x, y + 1);
+      return alongX === alongY ? 0 : alongX ? 2 : 1;
+    };
+    for (const b of s.buildings) {
+      if (b.type !== 'pumpjack') continue;
+      const o = orientAt(b.x, b.y);
+      const before = this.orients.get(b.id);
+      // Призрак не считается: поворот «на пробу» не запускает анимацию.
+      if (before !== undefined && before !== o && !ghost) this.bornAt.set(b.id, this.clock - POP_TIME * 0.5);
+      if (!ghost || before === undefined) this.orients.set(b.id, o);
+      this.previewOrients.set(b.id, o);
+    }
+    this.previewOrients.set(-1, ghost ? orientAt(ghost.x, ghost.y) : 0);
+  }
+
+  private orientOf(b: Building): PumpOrient {
+    return this.previewOrients.get(b.id) ?? 0;
   }
 
   private viewInsideMap(s: GameState): boolean {
@@ -352,6 +396,7 @@ export class Renderer {
         ctx.fillRect(x, y, 1, 1);
       }
     }
+    if (view.ghost?.type === 'pumpjack' && view.hover) this.drawPumpGuides(s, view.hover);
     if (selected) this.tileOutline(selected.x, selected.y, 'rgba(92,225,230,0.95)', 0.05);
     if (view.hover) {
       if (view.ghost) {
@@ -482,7 +527,7 @@ export class Renderer {
     }
     ctx.globalAlpha = 1;
     this.decals.drawRoads(ctx, s);
-    for (const b of s.buildings) if (b.x >= x0 - 2 && b.x < x0 + CELL + 2 && b.y >= y0 - 2 && b.y < y0 + CELL + 2) this.decals.drawPad(ctx, b);
+    for (const b of s.buildings) if (b.x >= x0 - 2 && b.x < x0 + CELL + 2 && b.y >= y0 - 2 && b.y < y0 + CELL + 2) this.decals.drawPad(ctx, b, b.type === 'pumpjack' ? pumpOrientAt(s, b.x, b.y) : 0);
     this.decals.drawPipes(ctx, s, x0 - 1, y0 - 1, x0 + CELL, y0 + CELL);
 
     const pMin = (v: number) => Math.max(0, Math.floor((v - 1) / PARCEL_SIZE));
@@ -622,6 +667,42 @@ export class Renderer {
     }
   }
 
+  /**
+   * Ориентиры расстановки качалок вокруг курсора: точки на клетках, где качалку можно поставить;
+   * у продолжения существующего ряда (сосед по стороне) — ромбик ярче. Пересчёт — только при смене клетки
+   * или зданий.
+   */
+  private drawPumpGuides(s: GameState, hover: { x: number; y: number }): void {
+    const key = `${hover.x}:${hover.y}:${s.buildings.length}:${s.nextId}:${s.unlocked.length}`;
+    if (key !== this.guideKey) {
+      this.guideKey = key;
+      this.guides = [];
+      const probe = { ...s, cash: Infinity };
+      const R = 6;
+      for (let y = hover.y - R; y <= hover.y + R; y++) {
+        for (let x = hover.x - R; x <= hover.x + R; x++) {
+          if (x < 0 || y < 0 || x >= s.map.size || y >= s.map.size) continue;
+          if (Math.abs(x - hover.x) + Math.abs(y - hover.y) > R) continue;
+          if (!canBuild(probe, 'pumpjack', x, y).ok) continue;
+          const n = pumpNeighbors(s, x, y);
+          this.guides.push([x, y, n.alongX || n.alongY ? 1 : 0]);
+        }
+      }
+    }
+    const { ctx } = this;
+    for (const [x, y, row] of this.guides) {
+      if (x === hover.x && y === hover.y) continue;
+      ctx.fillStyle = row ? 'rgba(120,235,150,0.75)' : 'rgba(255,255,255,0.4)';
+      const r = row ? 0.11 : 0.06;
+      ctx.beginPath();
+      ctx.moveTo(x + 0.5 - r, y + 0.5 - r);
+      ctx.lineTo(x + 0.5 + r, y + 0.5 - r);
+      ctx.lineTo(x + 0.5 + r, y + 0.5 + r);
+      ctx.lineTo(x + 0.5 - r, y + 0.5 + r);
+      ctx.fill();
+    }
+  }
+
   private tileOutline(x: number, y: number, color: string, w: number): void {
     const { ctx } = this;
     ctx.strokeStyle = color;
@@ -758,7 +839,7 @@ export class Renderer {
       shadows: () => {
         if (b.type === 'pumpjack') {
           // Тень кадра анимации: те же примитивы и кинематика, что и у модели.
-          this.castShadow(this.sprites.pumpjack(b.level, this.pumpPhase.get(b.id) ?? hash2(b.x, b.y, 1) * 6).shadows, b.x, b.y);
+          this.castShadow(this.sprites.pumpjack(b.level, this.pumpPhase.get(b.id) ?? hash2(b.x, b.y, 1) * 6, this.orientOf(b)).shadows, b.x, b.y);
           return;
         }
         const truck = b.type === 'terminal' ? this.truckOffset(b) : null;
@@ -787,7 +868,7 @@ export class Renderer {
     const { x, y } = b;
     switch (b.type) {
       case 'pumpjack':
-        return [() => this.blit(lib.pumpjack(b.level, this.pumpPhase.get(b.id) ?? hash2(x, y, 1) * 6), x, y)];
+        return [() => this.blit(lib.pumpjack(b.level, this.pumpPhase.get(b.id) ?? hash2(x, y, 1) * 6, this.orientOf(b)), x, y)];
       case 'tank':
         return [() => this.blit(lib.tank(b.level), x, y), () => this.drawGauge(b, fill)];
       case 'hq':
@@ -869,11 +950,11 @@ export class Renderer {
   }
 
   private animate(b: Building, simDt: number): void {
-    if (b.type === 'pumpjack' && b.status === 'ok') {
+    if (b.type === 'pumpjack' && (b.status === 'ok' || b.status === 'throttled')) {
       const before = this.pumpPhase.get(b.id) ?? hash2(b.x, b.y, 1) * 6;
       const after = before + simDt * (1.7 + 0.35 * b.level);
       this.pumpPhase.set(b.id, after);
-      const ex = pumpExhaust(b.level);
+      const ex = pumpExhaust(b.level, this.orientOf(b));
       if (ex && simDt > 0) {
         const at: [number, number, number] = [b.x + ex[0], b.y + ex[1], ex[2]];
         // Газовый двигатель: тонкий постоянный выхлоп и клуб на каждом ходе (два на оборот кривошипа).

@@ -539,10 +539,12 @@ export class Hud {
         const r = core.canBuild(s, g.mode, g.hover.x, g.hover.y);
         if (r.ok && g.mode === 'pumpjack') {
           const probe = { id: -1, type: 'pumpjack' as const, x: g.hover.x, y: g.hover.y, level: 1, enabled: true, invested: 0, status: 'ok' as const };
-          reason = ` · зона: ${core.drainageTiles(s, probe).length} кл., ${bbl(core.drainagePool(s, probe).reserve)}`;
+          const n = core.pumpNeighbors(s, g.hover.x, g.hover.y);
+          const row = n.alongX || n.alongY ? ' · встанет в ряд бок о бок' : '';
+          reason = ` · зона: ${core.drainageTiles(s, probe).length} кл., ${bbl(core.drainagePool(s, probe).reserve)}${row}`;
         } else reason = r.ok ? ' · можно строить' : ` · ${r.reason}`;
       }
-      text = `Строительство: ${name} (${money(core.buildCost(s, g.mode))})${reason}. ЛКМ — поставить, ПКМ или Esc — отмена`;
+      text = `Строительство: ${name} (${money(core.buildCost(s, g.mode))})${reason.replace(/\.$/, "")}. ЛКМ — поставить, ПКМ или Esc — отмена`;
     } else if (g.hover && core.inBounds(s, g.hover.x, g.hover.y)) {
       const i = core.tileIndex(s, g.hover.x, g.hover.y);
       const b = core.buildingAt(s, g.hover.x, g.hover.y);
@@ -583,7 +585,7 @@ export class Hud {
       'Как играть',
       `<p>Вы — владелец маленькой нефтяной компании. Превратите одну скважину в нефтяную империю.</p>
       <ul>
-        <li><b>Добыча.</b> Ставьте станки-качалки на тёмные пятна месторождений. Запасы истощаются — добыча постепенно падает.</li>
+        <li><b>Добыча.</b> Ставьте станки-качалки на тёмные пятна месторождений. Качалки встают рядами бок о бок (балансиры разворачиваются поперёк ряда), между рядами оставляйте проход в клетку — там удобно вести трубу. Запасы истощаются — добыча постепенно падает.</li>
         <li><b>Трубопроводы.</b> Качалка отдаёт нефть только по трубе в контору или резервуар (или стоя вплотную к ним). Тяните трубу инструментом «Трубопровод» (4) или нажмите «Подключить» у качалки. Труба пропускает ограниченный поток — перегруженный участок замените магистралью (5).</li>
         <li><b>Хранение.</b> Нефть копится на складе. Когда он полон, качалки простаивают, но содержание платить всё равно нужно.</li>
         <li><b>Продажа.</b> Вручную — перекупщику со скидкой 20%. Наливной терминал продаёт сам и по полной цене, можно задать минимальную цену.</li>

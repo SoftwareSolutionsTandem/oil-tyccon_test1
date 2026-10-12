@@ -33,7 +33,8 @@ export function canBuild(s: GameState, type: BuildableType, x: number, y: number
   if (type === 'pumpjack') {
     if (!hasDeposit) return fail('Качалку можно поставить только на месторождение');
     if (s.map.reserve[tileIndex(s, x, y)] <= 0) return fail('Месторождение исчерпано');
-    if (hasNeighborPump(s, x, y)) return fail('Слишком близко к другой скважине: между ними нужна клетка');
+    const why = rowConflict(s, x, y);
+    if (why) return fail(why);
   } else if (hasDeposit) {
     return fail('Не занимайте месторождение — здесь можно добывать нефть');
   }
@@ -41,9 +42,55 @@ export function canBuild(s: GameState, type: BuildableType, x: number, y: number
   return OK;
 }
 
-/** Скважины не ставят вплотную: соседняя по стороне клетка уже в зоне дренирования соседа. */
-export function hasNeighborPump(s: GameState, x: number, y: number): boolean {
-  return s.buildings.some((b) => b.type === 'pumpjack' && Math.abs(b.x - x) + Math.abs(b.y - y) === 1);
+/**
+ * Расстановка качалок рядами. Станок длинный вдоль балансира (1,2–1,4 клетки) и узкий поперёк (~0,45),
+ * поэтому соседние по стороне качалки стоят бок о бок, только если их балансиры параллельны — поперёк ряда.
+ * Отсюда правило: соседи по стороне у качалки — только вдоль одной оси (ряд вдоль x или вдоль y).
+ * Ряды не поворачивают и не примыкают друг к другу вплотную: между параллельными рядами — проход в клетку.
+ * По диагонали качалки ставить можно всегда.
+ */
+export type PumpOrient = 0 | 1 | 2;
+
+/** Есть ли качалка на клетке (с учётом пробной клетки extra). */
+function pumpAtTile(s: GameState, x: number, y: number, extra?: { x: number; y: number }): boolean {
+  if (extra && extra.x === x && extra.y === y) return true;
+  return s.buildings.some((b) => b.type === 'pumpjack' && b.x === x && b.y === y);
+}
+
+/** Соседи-качалки по сторонам: вдоль оси x и вдоль оси y. */
+export function pumpNeighbors(s: GameState, x: number, y: number, extra?: { x: number; y: number }): { alongX: boolean; alongY: boolean } {
+  return {
+    alongX: pumpAtTile(s, x - 1, y, extra) || pumpAtTile(s, x + 1, y, extra),
+    alongY: pumpAtTile(s, x, y - 1, extra) || pumpAtTile(s, x, y + 1, extra),
+  };
+}
+
+/**
+ * Ориентация качалки выводится из расстановки (не хранится): в ряду вдоль x балансир идёт вдоль y (2),
+ * в ряду вдоль y — вдоль x (1); одиночная качалка и качалка в старом сплошном блоке (соседи по обеим осям,
+ * допустимо в ранних сохранениях) — по диагонали клетки, профилем к зрителю (0).
+ */
+export function pumpOrientAt(s: GameState, x: number, y: number, extra?: { x: number; y: number }): PumpOrient {
+  const { alongX, alongY } = pumpNeighbors(s, x, y, extra);
+  if (alongX === alongY) return 0;
+  return alongX ? 2 : 1;
+}
+
+/** Причина, по которой качалку нельзя поставить в (x, y) из-за соседей, или null. */
+export function rowConflict(s: GameState, x: number, y: number): string | null {
+  const here = { x, y };
+  const own = pumpNeighbors(s, x, y);
+  if (own.alongX && own.alongY) return 'Качалки ставят рядами: здесь ряд поворачивал бы — между рядами нужен проход в одну клетку';
+  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (!pumpAtTile(s, nx, ny)) continue;
+    const n = pumpNeighbors(s, nx, ny, here);
+    if (n.alongX && n.alongY) {
+      return 'Соседняя качалка уже стоит в ряду другого направления: ряды не примыкают вплотную — нужен проход в одну клетку';
+    }
+  }
+  return null;
 }
 
 export function build(s: GameState, type: BuildableType, x: number, y: number): ActionResult {

@@ -1,9 +1,7 @@
-import { HQ_POS, type Building, type GameState } from '../core';
+import { HQ_POS, pumpOrientAt, type Building, type GameState, type PumpOrient } from '../core';
+import { pumpAxis, pumpWellhead } from './models';
 import { makeGroundMaterial, TEX_PATTERN } from './terrain';
 
-const R2 = Math.SQRT1_2;
-/** Устье скважины относительно угла клетки качалки (выкидная линия выходит назад-влево). */
-const WELLHEAD: [number, number] = [0.5 + (-0.5 - 0.27) * R2, 0.5 + (-0.27 + 0.5) * R2];
 const SIDES: ReadonlyArray<readonly [number, number]> = [
   [1, 0],
   [-1, 0],
@@ -150,12 +148,14 @@ export class GroundDecals {
   }
 
   /** Площадка под зданием: гравий у скважин и резервуаров, бетон у терминала и конторы. */
-  drawPad(ctx: CanvasRenderingContext2D, b: Building): void {
+  drawPad(ctx: CanvasRenderingContext2D, b: Building, orient: PumpOrient = 0): void {
     const { x, y } = b;
     ctx.save();
     if (b.type === 'pumpjack') {
+      // Площадка вытянута вдоль балансира.
+      const [ax, ay] = pumpAxis(orient);
       ctx.translate(x + 0.5, y + 0.5);
-      ctx.rotate(-Math.PI / 4);
+      ctx.rotate(Math.atan2(ay, ax));
       this.roundRect(ctx, -0.74, -0.33, 1.48, 0.66, 0.12);
       ctx.fillStyle = this.gravel;
       ctx.fill();
@@ -251,8 +251,9 @@ export class GroundDecals {
             links++;
             segs.push([cx, cy, ex, ey, kind]);
             if (b.type === 'pumpjack') {
-              // Отвод к устью скважины.
-              segs.push([ex, ey, b.x + WELLHEAD[0], b.y + WELLHEAD[1], 1]);
+              // Отвод к устью скважины (его положение зависит от ориентации станка в ряду).
+              const [wx, wy] = pumpWellhead(pumpOrientAt(s, b.x, b.y));
+              segs.push([ex, ey, b.x + wx, b.y + wy, 1]);
             } else {
               segs.push([ex, ey, ex + dx * 0.16, ey + dy * 0.16, kind]);
               flanges.push([ex + dx * 0.16, ey + dy * 0.16, kind]);
