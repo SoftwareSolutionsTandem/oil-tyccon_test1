@@ -32,7 +32,25 @@ function save(): void {
 const demo = new URLSearchParams(location.search).has('demo');
 const loaded = demo ? null : loadSave();
 const game = new Game(loaded ?? (demo ? createDemoState() : core.createNewGame()), renderer);
-const hud = new Hud(game, { newGame: startNewGame });
+const DAYNIGHT_KEY = 'oil-tycoon-daynight';
+try {
+  renderer.dayNight = localStorage.getItem(DAYNIGHT_KEY) !== 'off';
+} catch {
+  // Настройка недоступна — остаётся по умолчанию.
+}
+const hud = new Hud(game, {
+  newGame: startNewGame,
+  dayNight: () => renderer.dayNight,
+  toggleDayNight: () => {
+    renderer.dayNight = !renderer.dayNight;
+    try {
+      localStorage.setItem(DAYNIGHT_KEY, renderer.dayNight ? 'on' : 'off');
+    } catch {
+      // Не удалось сохранить настройку — действует до перезагрузки.
+    }
+  },
+  hour: () => renderer.lighting.hour,
+});
 renderer.adopt(game.state);
 camera.centerOnTile(core.HQ_POS.x + 3, core.HQ_POS.y + 3);
 

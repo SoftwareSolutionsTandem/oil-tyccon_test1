@@ -15,6 +15,10 @@ export class SpriteLibrary {
   private streaks = grimeTexture(128, 11, { streaks: true, contrast: 1.1 });
   private foliage = grimeTexture(64, 3, { contrast: 2.4 });
 
+  canvases(): HTMLCanvasElement[] {
+    return [...this.cache.values()].map((s) => s.canvas);
+  }
+
   private get(key: string, build: () => Sprite): Sprite {
     let s = this.cache.get(key);
     if (!s) {

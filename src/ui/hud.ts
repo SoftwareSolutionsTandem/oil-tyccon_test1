@@ -1,6 +1,7 @@
 import * as core from '../core';
 import type { BuildableType, Building, GameState } from '../core';
 import type { Game, ToastKind } from '../game';
+import { formatClock } from '../render/daylight';
 import { bbl, duration, money, num, price, rate } from './format';
 
 const BUILDABLE: BuildableType[] = ['pumpjack', 'tank', 'terminal'];
@@ -41,7 +42,12 @@ export class Hud {
 
   constructor(
     private game: Game,
-    private handlers: { newGame: () => void },
+    private handlers: {
+      newGame: () => void;
+      dayNight: () => boolean;
+      toggleDayNight: () => void;
+      hour: () => number;
+    },
   ) {
     this.root = document.getElementById('hud')!;
     this.root.append(this.buildTopbar(), this.buildLeft(), this.buildRight());
@@ -68,6 +74,7 @@ export class Hud {
       <div class="stat"><span class="label">Прибыль за минуту</span><span class="value" data-ref="profit"></span></div>
       <button class="primary" data-ref="sell" title="Продать всю нефть перекупщику со скидкой 20% (S)"></button>
       <div class="spacer"></div>
+      <div class="stat" style="min-width:64px" title="Время суток. Сутки длятся 10 минут игры на скорости ×1"><span class="label">Время</span><span class="value" data-ref="clock"></span></div>
       <div class="speed"></div>
       <button data-ref="menu" title="Меню">☰</button>`;
     bar.querySelectorAll<HTMLElement>('[data-ref]').forEach((e) => (this.refs[e.dataset.ref!] = e));
@@ -140,6 +147,9 @@ export class Hud {
     this.refs.sell.textContent = `Продать ${num(s.oil)} барр. · ${money(s.oil * core.manualSellPrice(s))}`;
     (this.refs.sell as HTMLButtonElement).disabled = s.oil < 1;
     for (const [v, b] of this.speedButtons) b.classList.toggle('active', this.game.speed === v);
+    const hour = this.handlers.hour();
+    const dayTime = hour >= 6 && hour < 20;
+    this.refs.clock.textContent = this.handlers.dayNight() ? `${dayTime ? '☀' : '☾'} ${formatClock(hour)}` : '☀ —';
 
     this.updateBuildCards();
     this.updateObjective();
@@ -433,6 +443,10 @@ export class Hud {
       '<p>Игра сохраняется автоматически каждые 10 секунд.</p>',
       [
         { label: 'Как играть', onClick: () => this.showHelp() },
+        {
+          label: `Смена дня и ночи: ${this.handlers.dayNight() ? 'вкл' : 'выкл'}`,
+          onClick: () => this.handlers.toggleDayNight(),
+        },
         {
           label: 'Новая игра',
           onClick: () =>

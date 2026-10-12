@@ -1,5 +1,5 @@
 import { HQ_POS, type Building, type GameState } from '../core';
-import { makeGroundMaterial, TEX } from './terrain';
+import { makeGroundMaterial, TEX_PATTERN } from './terrain';
 
 const R2 = Math.SQRT1_2;
 
@@ -16,7 +16,7 @@ export class GroundDecals {
   private roads: Array<Array<[number, number]>> = [];
 
   constructor(ctx: CanvasRenderingContext2D) {
-    const scale = new DOMMatrix().scale(1 / TEX, 1 / TEX);
+    const scale = new DOMMatrix().scale(1 / TEX_PATTERN, 1 / TEX_PATTERN);
     this.gravel = ctx.createPattern(makeGroundMaterial('gravel', 5), 'repeat')!;
     this.gravel.setTransform(scale);
     this.concrete = ctx.createPattern(makeGroundMaterial('concrete', 9), 'repeat')!;

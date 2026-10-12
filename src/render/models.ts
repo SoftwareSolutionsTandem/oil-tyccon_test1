@@ -323,24 +323,44 @@ export function truck(p: ModelPainter): void {
   for (const x of [0.1, 0.21, 0.5]) p.tube([x, 0.78, 0.06], [x, 0.82, 0.06], 0.058, M.rubber, 10);
 }
 
+/** Окна конторы (нужны и модели, и ночной подсветке). */
+export const HQ_WINDOWS: Array<{ side: 'x' | 'y'; quad: V3[] }> = (() => {
+  const out: Array<{ side: 'x' | 'y'; quad: V3[] }> = [];
+  for (const z of [0.1, 0.4]) {
+    for (let i = 0; i < 4; i++) {
+      const x = 0.15 + i * 0.19;
+      if (z < 0.2 && i === 1) continue; // место для двери
+      out.push({ side: 'y', quad: [[x, 0.862, z], [x + 0.12, 0.862, z], [x + 0.12, 0.862, z + 0.17], [x, 0.862, z + 0.17]] });
+    }
+    for (let i = 0; i < 4; i++) {
+      const y = 0.19 + i * 0.17;
+      out.push({ side: 'x', quad: [[0.902, y, z], [0.902, y + 0.11, z], [0.902, y + 0.11, z + 0.17], [0.902, y, z + 0.17]] });
+    }
+  }
+  return out;
+})();
+
+/** Точки ночного освещения в координатах модели. */
+export const LIGHTS = {
+  terminalLamps: [[0.25, 0.985, 0.84], [0.75, 0.985, 0.84]] as V3[],
+  terminalPool: [0.5, 0.7, 0] as V3,
+  hqEntrance: [0.41, 0.98, 0.3] as V3,
+  hqSign: [0.5, 0.62, 0.84] as V3,
+};
+
 /** Контора компании: двухэтажное здание с окнами, крыльцом, оборудованием на крыше и вывеской. */
 export function headquarters(p: ModelPainter): void {
   p.box(0.06, 0.1, 0, 0.94, 0.9, 0.04, M.concrete);
   p.box(0.1, 0.14, 0.04, 0.9, 0.86, 0.64, M.wall, M.roofGray);
   p.box(0.095, 0.135, 0.33, 0.905, 0.865, 0.35, M.concrete);
   const frame = mat([236, 232, 222], 0.05, 6);
-  for (const z of [0.1, 0.4]) {
-    for (let i = 0; i < 4; i++) {
-      const x = 0.15 + i * 0.19;
-      if (z < 0.2 && i === 1) continue; // место для двери
-      p.face([[x - 0.006, 0.861, z - 0.008], [x + 0.126, 0.861, z - 0.008], [x + 0.126, 0.861, z + 0.178], [x - 0.006, 0.861, z + 0.178]], frame, [0, 1, 0]);
-      p.face([[x, 0.862, z], [x + 0.12, 0.862, z], [x + 0.12, 0.862, z + 0.17], [x, 0.862, z + 0.17]], M.glass, [0, 1, 0]);
-    }
-    for (let i = 0; i < 4; i++) {
-      const y = 0.19 + i * 0.17;
-      p.face([[0.901, y - 0.006, z - 0.008], [0.901, y + 0.116, z - 0.008], [0.901, y + 0.116, z + 0.178], [0.901, y - 0.006, z + 0.178]], frame, [1, 0, 0]);
-      p.face([[0.902, y, z], [0.902, y + 0.11, z], [0.902, y + 0.11, z + 0.17], [0.902, y, z + 0.17]], M.glass, [1, 0, 0]);
-    }
+  for (const w of HQ_WINDOWS) {
+    const n: V3 = w.side === 'y' ? [0, 1, 0] : [1, 0, 0];
+    const grow = (q: V3, du: number, dz: number): V3 =>
+      w.side === 'y' ? [q[0] + du, q[1] - 0.001, q[2] + dz] : [q[0] - 0.001, q[1] + du, q[2] + dz];
+    const [a, b, c, d] = w.quad;
+    p.face([grow(a, -0.006, -0.008), grow(b, 0.006, -0.008), grow(c, 0.006, 0.008), grow(d, -0.006, 0.008)], frame, n);
+    p.face(w.quad, M.glass, n);
   }
   // Вход с козырьком.
   p.face([[0.35, 0.862, 0.04], [0.47, 0.862, 0.04], [0.47, 0.862, 0.26], [0.35, 0.862, 0.26]], mat([60, 54, 48], 0.2, 10), [0, 1, 0]);

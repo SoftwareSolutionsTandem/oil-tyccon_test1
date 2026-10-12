@@ -11,11 +11,12 @@ import {
 import { GroundDecals } from './ground';
 import { Camera, isoX, isoY } from './iso';
 import { proj, SPRITE_SCALE, ZPX, type ShadowShape, type Sprite } from './model';
-import { HQ_FLAG_TOP, pumpExhaust, tankGauge, TRUCK_DUST, TRUCK_EXHAUST, TRUCK_LENGTH } from './models';
+import { HQ_FLAG_TOP, HQ_WINDOWS, LIGHTS, pumpExhaust, tankDims, tankGauge, TRUCK_DUST, TRUCK_EXHAUST, TRUCK_LENGTH } from './models';
 import { ParticleSystem } from './particles';
 import { createCanvas, hash2 } from './noise';
 import { SpriteLibrary } from './sprites';
-import { makeStains, TEX, TerrainLayer } from './terrain';
+import { makeStains, TerrainLayer, TEX_HIGH, TEX_LOW } from './terrain';
+import { lightingAt, NOON, type Lighting } from './daylight';
 
 export interface ViewState {
   hover: { x: number; y: number } | null;
@@ -43,9 +44,28 @@ const TRUCK_LOAD = 0.55;
 /** Матрица проекции земли: клетки → пиксели мира. */
 const GROUND: [number, number, number, number, number, number] = [32, 16, -32, 16, 0, 0];
 const SHADOW_ALPHA = 0.5;
-/** Разрешение запечённой земли относительно пикселей мира и нахлёст кусков. */
-const GROUND_SCALE = 1.5;
-const CHUNK_MARGIN = 24;
+/** Ячейка кеша земли, клеток: меньше ячейка — дешевле перепекание после строительства. */
+const CELL = 4;
+/** Разрешение запечённой земли относительно пикселей мира: своя земля резче чужой. */
+const GROUND_SCALE_HIGH = 2;
+const GROUND_SCALE_LOW = 1;
+/** Запас холста ячейки земли за её ромбом, пиксели мира (видимый нахлёст ячеек — 0,06 клетки). */
+const CHUNK_MARGIN = 4;
+
+interface GroundCell {
+  canvas: HTMLCanvasElement;
+  key: string;
+  shadow: ShadowSprite | null;
+}
+
+function cellGeometry(x0: number, y0: number) {
+  return {
+    ox: isoX(x0, y0 + CELL) - CHUNK_MARGIN,
+    oy: isoY(x0, y0) - CHUNK_MARGIN,
+    w: CELL * 64 + CHUNK_MARGIN * 2,
+    h: CELL * 32 + CHUNK_MARGIN * 2,
+  };
+}
 /** Сколько ступеней прозрачности у пятен истощения (чтобы не перепекать землю каждый тик). */
 const STAIN_LEVELS = 8;
 
@@ -60,9 +80,8 @@ export class Renderer {
   private terrain: TerrainLayer | null = null;
   private decals: GroundDecals;
   private stains = makeStains(5, 17);
-  private shadowLayer = createCanvas(1, 1);
   private shadowSprites = new WeakMap<ShadowShape[], ShadowSprite>();
-  private groundCache = new Map<string, { canvas: HTMLCanvasElement; key: string }>();
+  private groundCache = new Map<number, GroundCell>();
   private width = 0;
   private height = 0;
   private dpr = 1;
@@ -76,6 +95,14 @@ export class Renderer {
   private floats: FloatText[] = [];
   private hqTrucks: number[] = [];
   readonly particles = new ParticleSystem();
+  /** Смена дня и ночи (настройка игрока); выключено — всегда полдень. */
+  dayNight = true;
+  /** Освещение последнего кадра (для интерфейса). */
+  lighting: Lighting = NOON;
+  /** Значки состояния рисуются после ночной цветокоррекции, чтобы не терять читаемость. */
+  private pendingBadges: Building[] = [];
+  private glowWarm = makeGlow([255, 214, 150]);
+  private glowRed = makeGlow([255, 70, 50]);
   /** Сглаженная длительность реального кадра — по ней снижается интенсивность частиц на слабых устройствах. */
   private avgFrame = 1 / 60;
   /** Время отрисовки последнего кадра, мс (для отладки производительности). */
@@ -113,6 +140,24 @@ export class Renderer {
     this.truckT.clear();
   }
 
+  /** Оценка памяти холстов по категориям, МБ (4 байта на пиксель). */
+  memoryStats(): Record<string, number> {
+    const mb = (canvases: Iterable<HTMLCanvasElement>) => {
+      let bytes = 0;
+      for (const c of canvases) bytes += c.width * c.height * 4;
+      return Math.round((bytes / 1048576) * 10) / 10;
+    };
+    const stats: Record<string, number> = {
+      terrainSource: mb(this.terrain?.canvases() ?? []),
+      groundChunks: mb([...this.groundCache.values()].map((e) => e.canvas)),
+      sprites: mb(this.sprites.canvases()),
+      groundShadows: mb([...this.groundCache.values()].flatMap((e) => (e.shadow ? [e.shadow.canvas] : []))),
+      frame: mb([this.canvas]),
+    };
+    stats.total = Math.round(Object.values(stats).reduce((a, b) => a + b, 0) * 10) / 10;
+    return stats;
+  }
+
   floatText(x: number, y: number, text: string, color = '#ffe08a'): void {
     this.floats.push({ x, y, text, color, age: 0 });
   }
@@ -133,6 +178,7 @@ export class Renderer {
     if (!this.terrain || this.terrain.seed !== s.seed) this.adopt(s);
     const simDt = dt * speed;
     const { ctx } = this;
+    this.updateGroundCache(s);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     const bg = ctx.createLinearGradient(0, 0, 0, this.canvas.height);
     bg.addColorStop(0, '#1a2430');
@@ -140,9 +186,11 @@ export class Renderer {
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
 
+    const light = this.dayNight ? lightingAt(s.time) : NOON;
+    this.lighting = light;
     this.applyCamera(ctx);
     this.drawSlab(s);
-    this.drawGround(s, view);
+    this.drawGround(s, view, light);
 
     this.avgFrame += (dt - this.avgFrame) * 0.05;
     // Медленнее 30 и 20 кадров/с — испускаем меньше частиц.
@@ -154,12 +202,15 @@ export class Renderer {
     }
     this.particles.update(simDt);
     const items = this.collectItems(s, view);
-    this.drawShadows(items);
+    this.drawShadows(items, light);
     // Пыль у земли сортируется по глубине вместе с объектами.
     this.particles.forEachAlive(0, (i, depth) => items.push({ order: depth + 0.3, draw: () => this.particles.drawOne(ctx, i) }));
     items.sort((a, b) => a.order - b.order);
     for (const it of items) it.draw();
     this.particles.draw(ctx, 1); // дым и выхлоп поднимаются над объектами
+    this.drawNight(s, light);
+    for (const b of this.pendingBadges) this.drawStatusBadge(b);
+    this.pendingBadges = [];
 
     this.drawFloats(dt);
     this.frameMs = performance.now() - t0;
@@ -209,30 +260,32 @@ export class Renderer {
     side([n, 0], [n, n], 0.62);
   }
 
-  private drawGround(s: GameState, view: ViewState): void {
+  /**
+   * Земля: запечённые в проекции ячейки 4×4 клетки, затем слой статичных теней с силой по времени суток.
+   * Устаревшая ячейка показывается, пока не перепечена (не больше одной за кадр).
+   */
+  private drawGround(s: GameState, view: ViewState, light: Lighting): void {
     const { ctx } = this;
     const r = this.viewRect();
     const n = s.map.size;
-    // Земля: запечённые в проекции куски по участкам. Устаревший кусок показывается, пока не перепечён (не больше одного за кадр).
-    let rebaked = 0;
-    for (let py = 0; py < PARCELS_PER_SIDE; py++) {
-      for (let px = 0; px < PARCELS_PER_SIDE; px++) {
-        const ox = isoX(px * PARCEL_SIZE, (py + 1) * PARCEL_SIZE) - CHUNK_MARGIN;
-        const oy = isoY(px * PARCEL_SIZE, py * PARCEL_SIZE) - CHUNK_MARGIN;
-        const w = PARCEL_SIZE * 64 + CHUNK_MARGIN * 2;
-        const h = PARCEL_SIZE * 32 + CHUNK_MARGIN * 2;
-        if (ox > r.x1 || ox + w < r.x0 || oy > r.y1 || oy + h < r.y0) continue;
-        const id = `${px},${py}`;
-        const key = this.chunkKey(s, px, py);
-        let entry = this.groundCache.get(id);
-        if ((!entry || entry.key !== key) && (rebaked < 1 || !entry)) {
-          entry = { canvas: this.bakeGroundChunk(s, px, py, entry?.canvas), key };
-          this.groundCache.set(id, entry);
-          rebaked++;
-        }
-        ctx.drawImage(entry.canvas, ox, oy, w, h);
+    const cells = n / CELL;
+    const visible: GroundCell[] = [];
+    for (let cy = 0; cy < cells; cy++) {
+      for (let cx = 0; cx < cells; cx++) {
+        const g = cellGeometry(cx * CELL, cy * CELL);
+        if (g.ox > r.x1 || g.ox + g.w < r.x0 || g.oy > r.y1 || g.oy + g.h < r.y0) continue;
+        const cell = this.groundCache.get(cy * cells + cx);
+        if (!cell) continue;
+        ctx.drawImage(cell.canvas, g.ox, g.oy, g.w, g.h);
+        visible.push(cell);
       }
     }
+    // Статичные тени: у каждой ячейки — тени своих объектов (каждая тень рисуется ровно один раз).
+    ctx.globalAlpha = SHADOW_ALPHA * light.shadow;
+    for (const cell of visible) {
+      if (cell.shadow) ctx.drawImage(cell.shadow.canvas, cell.shadow.ox, cell.shadow.oy, cell.shadow.w, cell.shadow.h);
+    }
+    ctx.globalAlpha = 1;
 
     ctx.save();
     ctx.transform(...GROUND);
@@ -272,59 +325,81 @@ export class Renderer {
     this.drawParcelBorders(s, view);
   }
 
-  /** Ключ содержимого куска земли: владение, уровни пятен, набор зданий (дороги и трубы). */
-  private chunkKey(s: GameState, px: number, py: number): string {
+  /**
+   * Обновление кеша земли выполняется в начале кадра, до любого рисования, и в новые холсты:
+   * перезапись холста, который уже нарисован в текущем кадре, заставила бы браузер дорисовать весь кадр заранее.
+   * Отсутствующие видимые ячейки запекаются сразу, устаревшие — не больше одной за кадр.
+   */
+  private updateGroundCache(s: GameState): void {
+    const r = this.viewRect();
+    const cells = s.map.size / CELL;
+    let rebaked = 0;
+    for (let cy = 0; cy < cells; cy++) {
+      for (let cx = 0; cx < cells; cx++) {
+        const g = cellGeometry(cx * CELL, cy * CELL);
+        if (g.ox > r.x1 || g.ox + g.w < r.x0 || g.oy > r.y1 || g.oy + g.h < r.y0) continue;
+        const id = cy * cells + cx;
+        const cell = this.groundCache.get(id);
+        if (cell && rebaked >= 1) continue;
+        const key = this.cellKey(s, cx * CELL, cy * CELL);
+        if (cell && cell.key === key) continue;
+        this.groundCache.set(id, this.bakeCell(s, cx * CELL, cy * CELL, key));
+        if (cell) rebaked++;
+      }
+    }
+  }
+
+  /** Ключ содержимого ячейки: качество, владение, уровни пятен, здания рядом и проходящие трассы. */
+  private cellKey(s: GameState, x0: number, y0: number): string {
     const n = s.map.size;
     let stains = '';
-    for (let y = py * PARCEL_SIZE - 1; y < (py + 1) * PARCEL_SIZE + 1; y++) {
-      for (let x = px * PARCEL_SIZE - 1; x < (px + 1) * PARCEL_SIZE + 1; x++) {
+    for (let y = y0 - 1; y < y0 + CELL + 1; y++) {
+      for (let x = x0 - 1; x < x0 + CELL + 1; x++) {
         if (x < 0 || y < 0 || x >= n || y >= n) continue;
         const i = y * n + x;
         if (s.map.initial[i] > 0) stains += Math.round((s.map.reserve[i] / s.map.initial[i]) * STAIN_LEVELS).toString(36);
       }
     }
     let owned = '';
-    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) owned += isParcelOwned(s, px + dx, py + dy) ? '1' : '0';
-    const x0 = px * PARCEL_SIZE;
-    const y0 = py * PARCEL_SIZE;
-    // Здания рядом (площадки и тени могут заходить на соседний участок) и трассы, проходящие через кусок.
+    for (let py = Math.floor((y0 - 1) / PARCEL_SIZE); py <= Math.floor((y0 + CELL) / PARCEL_SIZE); py++)
+      for (let px = Math.floor((x0 - 1) / PARCEL_SIZE); px <= Math.floor((x0 + CELL) / PARCEL_SIZE); px++) owned += isParcelOwned(s, px, py) ? '1' : '0';
     const buildings = s.buildings
-      .filter((b) => b.x >= x0 - 3 && b.x < x0 + PARCEL_SIZE + 3 && b.y >= y0 - 3 && b.y < y0 + PARCEL_SIZE + 3)
+      .filter((b) => b.x >= x0 - 3 && b.x < x0 + CELL + 3 && b.y >= y0 - 3 && b.y < y0 + CELL + 3)
       .map((b) => `${b.type}:${b.x}:${b.y}:${b.level}`)
       .join('|');
-    const routes = this.decals.routesSignature(s, x0 - 1, y0 - 1, x0 + PARCEL_SIZE + 1, y0 + PARCEL_SIZE + 1);
+    const routes = this.decals.routesSignature(s, x0 - 1, y0 - 1, x0 + CELL + 1, y0 + CELL + 1);
     return `${owned}/${stains}/${buildings}/${routes}`;
   }
 
   /**
-   * Запекает кусок земли в проекции: текстура, пятна нефти, дороги, площадки, трубы, затемнение чужой земли.
-   * Кусок рисуется с небольшим нахлёстом на соседей; содержимое нахлёста у соседей совпадает, поэтому швов нет.
+   * Запекает ячейку земли в проекции: текстура, пятна нефти, дороги, площадки, трубы, затемнение чужой земли;
+   * отдельно — слой статичных теней. Ячейки перекрываются с одинаковым содержимым, поэтому швов нет.
+   * Своя земля — в повышенном разрешении; у чужой исходная текстура освобождается сразу после запекания.
    */
-  private bakeGroundChunk(s: GameState, px: number, py: number, reuse?: HTMLCanvasElement): HTMLCanvasElement {
+  private bakeCell(s: GameState, x0: number, y0: number, key: string): GroundCell {
     const n = s.map.size;
-    const ox = isoX(px * PARCEL_SIZE, (py + 1) * PARCEL_SIZE) - CHUNK_MARGIN;
-    const oy = isoY(px * PARCEL_SIZE, py * PARCEL_SIZE) - CHUNK_MARGIN;
-    const w = PARCEL_SIZE * 64 + CHUNK_MARGIN * 2;
-    const h = PARCEL_SIZE * 32 + CHUNK_MARGIN * 2;
-    const canvas = reuse ?? createCanvas(w * GROUND_SCALE, h * GROUND_SCALE);
+    const owned = isParcelOwned(s, Math.floor(x0 / PARCEL_SIZE), Math.floor(y0 / PARCEL_SIZE));
+    const scale = owned ? GROUND_SCALE_HIGH : GROUND_SCALE_LOW;
+    const tex = owned ? TEX_HIGH : TEX_LOW;
+    const g = cellGeometry(x0, y0);
+    const cw = Math.ceil(g.w * scale);
+    const ch = Math.ceil(g.h * scale);
+    const canvas = createCanvas(cw, ch);
     const ctx = canvas.getContext('2d')!;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.setTransform(GROUND_SCALE, 0, 0, GROUND_SCALE, -ox * GROUND_SCALE, -oy * GROUND_SCALE);
+    ctx.setTransform(scale, 0, 0, scale, -g.ox * scale, -g.oy * scale);
     ctx.transform(...GROUND);
-    const x0 = px * PARCEL_SIZE;
-    const y0 = py * PARCEL_SIZE;
     const e = 0.06;
     ctx.beginPath();
-    ctx.rect(Math.max(0, x0 - e), Math.max(0, y0 - e), Math.min(n, x0 + PARCEL_SIZE + e) - Math.max(0, x0 - e), Math.min(n, y0 + PARCEL_SIZE + e) - Math.max(0, y0 - e));
+    ctx.rect(Math.max(0, x0 - e), Math.max(0, y0 - e), Math.min(n, x0 + CELL + e) - Math.max(0, x0 - e), Math.min(n, y0 + CELL + e) - Math.max(0, y0 - e));
     ctx.clip();
 
-    const terrain = this.terrain!.bake(px, py);
-    const pad = (terrain.width - PARCEL_SIZE * TEX) / 2 / TEX;
-    ctx.drawImage(terrain, x0 - pad, y0 - pad, terrain.width / TEX, terrain.height / TEX);
+    const terrain = this.terrain!.bake(x0, y0, CELL, tex);
+    ctx.drawImage(terrain.canvas, x0 - terrain.pad, y0 - terrain.pad, CELL + terrain.pad * 2, CELL + terrain.pad * 2);
+    // Исходник нужен только там, где земля может меняться: своя и соседняя с ней (площадки, трубы, тени у границы).
+    if (!owned && !this.nearOwned(s, x0, y0)) this.terrain!.release(x0, y0, CELL, tex);
 
-    for (let y = y0 - 1; y < y0 + PARCEL_SIZE + 1; y++) {
-      for (let x = x0 - 1; x < x0 + PARCEL_SIZE + 1; x++) {
+    for (let y = y0 - 1; y < y0 + CELL + 1; y++) {
+      for (let x = x0 - 1; x < x0 + CELL + 1; x++) {
         if (x < 0 || y < 0 || x >= n || y >= n) continue;
         const i = y * n + x;
         if (s.map.initial[i] <= 0) continue;
@@ -341,15 +416,14 @@ export class Renderer {
     }
     ctx.globalAlpha = 1;
     this.decals.drawRoads(ctx, s);
-    for (const b of s.buildings) if (Math.abs(b.x + 0.5 - (x0 + 4)) < 6 && Math.abs(b.y + 0.5 - (y0 + 4)) < 6) this.decals.drawPad(ctx, b);
+    for (const b of s.buildings) if (b.x >= x0 - 2 && b.x < x0 + CELL + 2 && b.y >= y0 - 2 && b.y < y0 + CELL + 2) this.decals.drawPad(ctx, b);
     this.decals.drawPipes(ctx);
-    this.bakeChunkShadows(s, ctx, x0, y0, canvas);
 
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        const qx = px + dx;
-        const qy = py + dy;
-        if (qx < 0 || qy < 0 || qx >= PARCELS_PER_SIDE || qy >= PARCELS_PER_SIDE || isParcelOwned(s, qx, qy)) continue;
+    const pMin = (v: number) => Math.max(0, Math.floor((v - 1) / PARCEL_SIZE));
+    const pMax = (v: number) => Math.min(PARCELS_PER_SIDE - 1, Math.floor((v + CELL) / PARCEL_SIZE));
+    for (let qy = pMin(y0); qy <= pMax(y0); qy++) {
+      for (let qx = pMin(x0); qx <= pMax(x0); qx++) {
+        if (isParcelOwned(s, qx, qy)) continue;
         ctx.globalCompositeOperation = 'saturation';
         ctx.fillStyle = 'rgba(128,128,128,0.4)';
         ctx.fillRect(qx * PARCEL_SIZE, qy * PARCEL_SIZE, PARCEL_SIZE, PARCEL_SIZE);
@@ -358,44 +432,50 @@ export class Renderer {
         ctx.fillRect(qx * PARCEL_SIZE, qy * PARCEL_SIZE, PARCEL_SIZE, PARCEL_SIZE);
       }
     }
-    return canvas;
+    return { canvas, key, shadow: this.bakeCellShadows(s, x0, y0, owned ? 1 : 0.5) };
   }
 
-  /** Статичные тени зданий и декора: сначала непрозрачно во временный слой (без двойного затемнения), затем с прозрачностью. */
-  private bakeChunkShadows(s: GameState, ctx: CanvasRenderingContext2D, x0: number, y0: number, target: HTMLCanvasElement): void {
-    if (this.shadowLayer.width !== target.width || this.shadowLayer.height !== target.height) {
-      this.shadowLayer.width = target.width;
-      this.shadowLayer.height = target.height;
-    }
-    const layer = this.shadowLayer;
-    const lc = layer.getContext('2d')!;
-    lc.setTransform(1, 0, 0, 1, 0, 0);
-    lc.clearRect(0, 0, layer.width, layer.height);
-    lc.setTransform(ctx.getTransform());
-    lc.transform(1 / 32 / 2, -1 / 32 / 2, 1 / 16 / 2, 1 / 16 / 2, 0, 0); // обратно из клеток в пиксели мира
-    const near = (x: number, y: number) => x >= x0 - 3 && x < x0 + PARCEL_SIZE + 2 && y >= y0 - 2 && y < y0 + PARCEL_SIZE + 3;
-    const put = (shapes: ShadowShape[], x: number, y: number) => {
-      if (shapes.length === 0) return;
-      const sh = this.shadowOf(shapes);
-      lc.drawImage(sh.canvas, isoX(x, y) + sh.ox, isoY(x, y) + sh.oy, sh.w, sh.h);
-    };
+  private nearOwned(s: GameState, x0: number, y0: number): boolean {
+    for (let py = Math.floor((y0 - CELL) / PARCEL_SIZE); py <= Math.floor((y0 + 2 * CELL - 1) / PARCEL_SIZE); py++)
+      for (let px = Math.floor((x0 - CELL) / PARCEL_SIZE); px <= Math.floor((x0 + 2 * CELL - 1) / PARCEL_SIZE); px++)
+        if (isParcelOwned(s, px, py)) return true;
+    return false;
+  }
+
+  /** Тени объектов, стоящих в ячейке: непрозрачно (объединение без двойного затемнения); прозрачность — при выводе. */
+  private bakeCellShadows(s: GameState, x0: number, y0: number, scale: number): ShadowSprite | null {
+    const inCell = (x: number, y: number) => x >= x0 && x < x0 + CELL && y >= y0 && y < y0 + CELL;
+    const casts: Array<{ shapes: ShadowShape[]; x: number; y: number }> = [];
     const occupied = new Set<number>();
     for (const b of s.buildings) {
       occupied.add(b.y * s.map.size + b.x);
-      if (near(b.x, b.y)) for (const sp of this.buildingSprites(b)) put(sp.sprite.shadows, b.x + sp.dx, b.y);
+      if (inCell(b.x, b.y)) for (const sp of this.buildingSprites(b)) casts.push({ shapes: sp.sprite.shadows, x: b.x + sp.dx, y: b.y });
     }
-    for (let i = 0; i < s.map.decor.length; i++) {
-      const kind = s.map.decor[i];
-      const x = i % s.map.size;
-      const y = Math.floor(i / s.map.size);
-      if (!kind || occupied.has(i) || !near(x, y)) continue;
-      put(this.sprites.decor(kind, Math.floor(hash2(x, y, 5) * 4), false).shadows, x, y);
+    for (let y = y0; y < y0 + CELL; y++) {
+      for (let x = x0; x < x0 + CELL; x++) {
+        const i = y * s.map.size + x;
+        const kind = s.map.decor[i];
+        if (!kind || occupied.has(i)) continue;
+        casts.push({ shapes: this.sprites.decor(kind, Math.floor(hash2(x, y, 5) * 4), false).shadows, x, y });
+      }
     }
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalAlpha = SHADOW_ALPHA;
-    ctx.drawImage(layer, 0, 0);
-    ctx.restore();
+    const placed = casts
+      .filter((c) => c.shapes.length > 0)
+      .map((c) => {
+        const sh = this.shadowOf(c.shapes);
+        return { sh, x: isoX(c.x, c.y) + sh.ox, y: isoY(c.x, c.y) + sh.oy };
+      });
+    if (placed.length === 0) return null;
+    // Холст ровно по габаритам теней: меньше перерисовки пустых пикселей в каждом кадре.
+    const ox = Math.floor(Math.min(...placed.map((p) => p.x)));
+    const oy = Math.floor(Math.min(...placed.map((p) => p.y)));
+    const w = Math.ceil(Math.max(...placed.map((p) => p.x + p.sh.w))) - ox;
+    const h = Math.ceil(Math.max(...placed.map((p) => p.y + p.sh.h))) - oy;
+    const canvas = createCanvas(w * scale, h * scale);
+    const ctx = canvas.getContext('2d')!;
+    ctx.setTransform(scale, 0, 0, scale, -ox * scale, -oy * scale);
+    for (const p of placed) ctx.drawImage(p.sh.canvas, p.x, p.y, p.sh.w, p.sh.h);
+    return { canvas, ox, oy, w, h };
   }
 
   private tileOutline(x: number, y: number, color: string, w: number): void {
@@ -514,7 +594,7 @@ export class Renderer {
         if (!b.enabled) ctx.globalAlpha = 0.72;
         for (const part of this.buildingParts(b, fill)) part();
         ctx.restore();
-        this.drawStatusBadge(b);
+        this.pendingBadges.push(b);
       },
       shadows: () => {
         if (b.type === 'pumpjack') {
@@ -704,11 +784,77 @@ export class Renderer {
   }
 
   /** Тени движущихся объектов (качалки, бензовозы) рисуются прямо поверх земли; статичные запечены в землю. */
-  private drawShadows(items: DrawItem[]): void {
+  private drawShadows(items: DrawItem[], light: Lighting): void {
     this.ctx.save();
-    this.ctx.globalAlpha = SHADOW_ALPHA;
+    this.ctx.globalAlpha = SHADOW_ALPHA * light.shadow;
     for (const it of items) it.shadows?.();
     this.ctx.restore();
+  }
+
+  // ——— Время суток ———
+
+  /**
+   * Цветокоррекция кадра (multiply) и искусственный свет (additive). Днём проход пропускается целиком.
+   * Значки и всплывающий текст рисуются позже — они не темнеют.
+   */
+  private drawNight(s: GameState, light: Lighting): void {
+    const [r, g, b] = light.tint;
+    const { ctx } = this;
+    if (r > 0.995 && g > 0.995 && b > 0.995) return;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.fillStyle = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.restore();
+    if (light.night < 0.03) return;
+    const view = this.viewRect();
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const glow = (tex: HTMLCanvasElement, p: readonly [number, number, number], rx: number, ry: number, a: number) => {
+      const [x, y] = proj(p);
+      if (x < view.x0 || x > view.x1 || y < view.y0 || y > view.y1) return;
+      ctx.globalAlpha = a * light.night;
+      ctx.drawImage(tex, x - rx, y - ry, rx * 2, ry * 2);
+    };
+    const at = (b: Building, p: readonly number[]): [number, number, number] => [b.x + p[0], b.y + p[1], p[2]];
+    for (const b of s.buildings) {
+      if (b.type === 'terminal') {
+        glow(this.glowWarm, at(b, LIGHTS.terminalPool), 46, 24, 0.55);
+        for (const l of LIGHTS.terminalLamps) glow(this.glowWarm, at(b, l), 9, 9, 0.9);
+      } else if (b.type === 'hq') {
+        ctx.fillStyle = 'rgba(255,206,120,1)';
+        HQ_WINDOWS.forEach((w, i) => {
+          if (hash2(b.x * 31 + i, b.y, 7) < 0.3) return; // часть окон тёмная
+          ctx.globalAlpha = 0.75 * light.night;
+          ctx.beginPath();
+          w.quad.forEach((q, k) => {
+            const [x, y] = proj(at(b, q));
+            if (k === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.closePath();
+          ctx.fill();
+        });
+        glow(this.glowWarm, at(b, LIGHTS.hqEntrance), 18, 12, 0.7);
+        glow(this.glowWarm, at(b, LIGHTS.hqSign), 22, 10, 0.5);
+      } else if (b.type === 'tank') {
+        // Заградительный огонь на крыше, медленно мигает.
+        const { h, z0 } = tankDims(b.level);
+        const blink = 0.55 + 0.45 * Math.sin(this.clock * 2.2 + b.id);
+        glow(this.glowRed, [b.x + 0.5, b.y + 0.5, z0 + h + 0.12], 6, 6, blink);
+      }
+    }
+    // Фары уезжающих бензовозов.
+    for (const b of s.buildings) {
+      if (b.type !== 'terminal') continue;
+      const truck = this.truckOffset(b);
+      if (!truck || truck.dx === 0) continue;
+      const front = truck.dir === 1 ? 0.64 : TRUCK_LENGTH - 0.64;
+      for (const y of [0.64, 0.76]) glow(this.glowWarm, [b.x + truck.dx + front, b.y + y, 0.12], 5, 5, 0.9 * truck.alpha);
+      glow(this.glowWarm, [b.x + truck.dx + front + 0.45 * truck.dir, b.y + 0.7, 0], 26, 12, 0.4 * truck.alpha);
+    }
+    ctx.restore();
   }
 
   // ——— Динамические детали ———
@@ -874,4 +1020,17 @@ function bakeShadow(shapes: ShadowShape[]): ShadowSprite {
 /** Точка на модели бензовоза с учётом разворота (зеркально по x относительно кузова). */
 function truckPoint(p: readonly [number, number, number], dir: 1 | -1): [number, number, number] {
   return dir === 1 ? [p[0], p[1], p[2]] : [TRUCK_LENGTH - p[0], p[1], p[2]];
+}
+
+/** Мягкое световое пятно для аддитивного смешивания. */
+function makeGlow(rgb: [number, number, number]): HTMLCanvasElement {
+  const c = createCanvas(64, 64);
+  const ctx = c.getContext('2d')!;
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, `rgba(${rgb.join(',')},1)`);
+  g.addColorStop(0.25, `rgba(${rgb.join(',')},0.55)`);
+  g.addColorStop(1, `rgba(${rgb.join(',')},0)`);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  return c;
 }

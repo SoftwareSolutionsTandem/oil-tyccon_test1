@@ -1,11 +1,14 @@
-import { PARCEL_SIZE } from '../core';
 import { LIGHT } from './model';
 import { createCanvas, fbm, hash2, smoothstep, valueNoise } from './noise';
 
-/** Пикселей текстуры на клетку. Земля рисуется в координатах клеток и проецируется аффинным преобразованием. */
-export const TEX = 64;
-const PAD = 8;
-const STEP = 4;
+/**
+ * Пикселей текстуры на клетку. Земля рисуется в координатах клеток и проецируется аффинным преобразованием.
+ * Своя земля генерируется в высоком разрешении (резко при приближении), чужая — в низком.
+ */
+export const TEX_HIGH = 96;
+export const TEX_LOW = 48;
+/** Запас текстуры за краем ячейки, в клетках: соседние ячейки перекрываются одинаковым содержимым. */
+const PAD_TILES = 0.125;
 
 type RGBf = [number, number, number];
 const DIRT: RGBf = [170, 146, 108];
@@ -21,7 +24,7 @@ interface Track {
 }
 
 /**
- * Непрерывная процедурная текстура земли, разбитая на куски по участкам 8×8.
+ * Непрерывная процедурная текстура земли, разбитая на квадратные ячейки.
  * Содержимое зависит только от мировых координат, поэтому перекрывающиеся поля соседних кусков
  * совпадают и швов между ними нет.
  */
@@ -69,23 +72,31 @@ export class TerrainLayer {
     return smoothstep(0.42, 0.62, f.biome + (f.patch - 0.5) * 0.35);
   }
 
-  isBaked(px: number, py: number): boolean {
-    return this.chunks.has(`${px},${py}`);
+  canvases(): HTMLCanvasElement[] {
+    return [...this.chunks.values()];
   }
 
-  chunk(px: number, py: number): HTMLCanvasElement | undefined {
-    return this.chunks.get(`${px},${py}`);
+  /** Освобождает исходник ячейки (например, у чужой земли после запекания в проекцию). */
+  release(x0: number, y0: number, cell: number, tex: number): void {
+    this.chunks.delete(`${x0},${y0},${cell},${tex}`);
   }
 
-  bake(px: number, py: number): HTMLCanvasElement {
-    const key = `${px},${py}`;
+  /**
+   * Текстура квадрата клеток [x0, x0+cell) × [y0, y0+cell) с запасом PAD_TILES по краям.
+   * Возвращает холст и запас в клетках.
+   */
+  bake(x0: number, y0: number, cell: number, tex: number): { canvas: HTMLCanvasElement; pad: number } {
+    const key = `${x0},${y0},${cell},${tex}`;
     const existing = this.chunks.get(key);
-    if (existing) return existing;
-    const size = PARCEL_SIZE * TEX + PAD * 2;
+    if (existing) return { canvas: existing, pad: PAD_TILES };
+    const PAD = Math.round(PAD_TILES * tex);
+    const STEP = Math.max(2, Math.round(tex / 16));
+    const TEX = tex;
+    const size = cell * TEX + PAD * 2;
     const canvas = createCanvas(size, size);
     const ctx = canvas.getContext('2d')!;
-    const u0 = px * PARCEL_SIZE - PAD / TEX;
-    const v0 = py * PARCEL_SIZE - PAD / TEX;
+    const u0 = x0 - PAD / TEX;
+    const v0 = y0 - PAD / TEX;
 
     // 1. Низкочастотные поля на грубой сетке.
     const gw = Math.ceil(size / STEP) + 2;
@@ -105,11 +116,26 @@ export class TerrainLayer {
       }
     }
 
-    // 2. Попиксельно: интерполяция, рельефная светотень, мелкая деталь и зерно.
+    // 2. Мелкая деталь — на сетке с шагом ~1/32 клетки (её период ~1/9 клетки), дальше билинейно.
+    const FSTEP = Math.max(1, Math.round(TEX / 32));
+    const fw = Math.ceil(size / FSTEP) + 2;
+    const fFine = new Float32Array(fw * fw);
+    for (let gy = 0; gy < fw; gy++) {
+      for (let gx = 0; gx < fw; gx++) {
+        const u = u0 + (gx * FSTEP) / TEX;
+        const v = v0 + (gy * FSTEP) / TEX;
+        fFine[gy * fw + gx] = valueNoise(u * 3.2, v * 3.2, this.seed + 4) * 0.6 + valueNoise(u * 9, v * 9, this.seed + 5) * 0.4;
+      }
+    }
+
+    // 3. Попиксельно: интерполяция, рельефная светотень, мелкая деталь и зерно.
     const img = ctx.createImageData(size, size);
     const d = img.data;
     const relief = 6;
     for (let y = 0; y < size; y++) {
+      const fyf = y / FSTEP;
+      const fy = Math.floor(fyf);
+      const fty = fyf - fy;
       const gyf = y / STEP;
       const gy = Math.floor(gyf);
       const ty = gyf - gy;
@@ -131,8 +157,15 @@ export class TerrainLayer {
         const lit = 1 + (-hu * LIGHT[0] - hv * LIGHT[1]) * relief;
         const u = u0 + x / TEX;
         const v = v0 + y / TEX;
-        const fine = valueNoise(u * 3.2, v * 3.2, this.seed + 4) * 0.6 + valueNoise(u * 9, v * 9, this.seed + 5) * 0.4;
-        const grain = hash2(x + px * 977, y + py * 613, this.seed) - 0.5;
+        const fxf = x / FSTEP;
+        const fx = Math.floor(fxf);
+        const ftx = fxf - fx;
+        const f00 = fy * fw + fx;
+        const fa = fFine[f00] + (fFine[f00 + 1] - fFine[f00]) * ftx;
+        const fb = fFine[f00 + fw] + (fFine[f00 + fw + 1] - fFine[f00 + fw]) * ftx;
+        const fine = fa + (fb - fa) * fty;
+        // Зерно привязано к мировым координатам: совпадает в перекрытии ячеек любого разрешения.
+        const grain = hash2(Math.floor(u * 64), Math.floor(v * 64), this.seed) - 0.5;
         const k = lit * (0.9 + fine * 0.16) + grain * 0.06;
         const o = (y * size + x) * 4;
         d[o] = (c00[0] * w00 + c10[0] * w10 + c01[0] * w01 + c11[0] * w11) * k;
@@ -143,7 +176,7 @@ export class TerrainLayer {
     }
     ctx.putImageData(img, 0, 0);
 
-    // 3. Векторные детали в координатах клеток: колеи, трещины, трава, камешки.
+    // 4. Векторные детали в координатах клеток: колеи, трещины, трава, камешки.
     ctx.setTransform(TEX, 0, 0, TEX, -u0 * TEX, -v0 * TEX);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -163,15 +196,13 @@ export class TerrainLayer {
         ctx.stroke();
       }
     }
-    const x0 = px * PARCEL_SIZE - 1;
-    const y0 = py * PARCEL_SIZE - 1;
-    for (let ty = y0; ty < y0 + PARCEL_SIZE + 2; ty++) {
-      for (let tx = x0; tx < x0 + PARCEL_SIZE + 2; tx++) {
+    for (let ty = y0 - 1; ty < y0 + cell + 1; ty++) {
+      for (let tx = x0 - 1; tx < x0 + cell + 1; tx++) {
         this.tileDetails(ctx, tx, ty);
       }
     }
     this.chunks.set(key, canvas);
-    return canvas;
+    return { canvas, pad: PAD_TILES };
   }
 
   private tileDetails(ctx: CanvasRenderingContext2D, tx: number, ty: number): void {
@@ -288,7 +319,8 @@ export function makeStains(count: number, seed: number): HTMLCanvasElement[] {
   return out;
 }
 
-/** Бесшовные материалы площадок (гравий, бетон) для заливки узором. */
+/** Бесшовные материалы площадок (гравий, бетон) для заливки узором; узор задан в пикселях текстуры TEX_PATTERN на клетку. */
+export const TEX_PATTERN = 64;
 export function makeGroundMaterial(kind: 'gravel' | 'concrete', seed: number): HTMLCanvasElement {
   const size = 64;
   const c = createCanvas(size, size);
