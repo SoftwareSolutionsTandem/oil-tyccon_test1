@@ -1,0 +1,277 @@
+import { describe, expect, it } from 'vitest';
+import {
+  build,
+  buildCost,
+  buyParcel,
+  createNewGame,
+  demolish,
+  deserialize,
+  HQ_STORAGE,
+  lastMinute,
+  MANUAL_SELL_FACTOR,
+  PARCEL_SIZE,
+  sellManual,
+  serialize,
+  setSellThreshold,
+  simulateOffline,
+  START_CASH,
+  START_PARCEL,
+  storageCapacity,
+  tick,
+  TICK,
+  upgrade,
+  type GameState,
+} from '../src/core';
+
+function depositTiles(s: GameState): Array<{ x: number; y: number }> {
+  const out = [];
+  for (let y = 0; y < s.map.size; y++)
+    for (let x = 0; x < s.map.size; x++) if (s.map.initial[y * s.map.size + x] > 0) out.push({ x, y });
+  return out;
+}
+
+function ownedDeposits(s: GameState) {
+  const x0 = START_PARCEL.px * PARCEL_SIZE;
+  const y0 = START_PARCEL.py * PARCEL_SIZE;
+  return depositTiles(s).filter((t) => t.x >= x0 && t.x < x0 + PARCEL_SIZE && t.y >= y0 && t.y < y0 + PARCEL_SIZE);
+}
+
+function freeOwnedTile(s: GameState) {
+  const x0 = START_PARCEL.px * PARCEL_SIZE;
+  const y0 = START_PARCEL.py * PARCEL_SIZE;
+  for (let y = y0; y < y0 + PARCEL_SIZE; y++)
+    for (let x = x0; x < x0 + PARCEL_SIZE; x++)
+      if (s.map.initial[y * s.map.size + x] === 0 && !s.buildings.some((b) => b.x === x && b.y === y)) return { x, y };
+  throw new Error('нет свободной клетки');
+}
+
+function run(s: GameState, seconds: number) {
+  for (let i = 0; i < Math.round(seconds / TICK); i++) tick(s, TICK);
+}
+
+/** Деньги всегда объясняются потоками: так экономика остаётся прозрачной для игрока. */
+function expectBalanced(s: GameState, startCash = START_CASH) {
+  const t = s.totals;
+  expect(s.cash).toBeCloseTo(startCash + t.revenue + t.rewards + t.refunds - t.expenses - t.capex, 6);
+}
+
+describe('новая игра', () => {
+  it('создаёт контору, стартовый участок и месторождение', () => {
+    const s = createNewGame(42);
+    expect(s.buildings).toHaveLength(1);
+    expect(s.buildings[0].type).toBe('hq');
+    expect(storageCapacity(s)).toBe(HQ_STORAGE);
+    expect(s.map.owned.filter(Boolean)).toHaveLength(1);
+    expect(ownedDeposits(s).length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('генерация карты детерминирована по seed', () => {
+    expect(createNewGame(7).map).toEqual(createNewGame(7).map);
+  });
+});
+
+describe('строительство', () => {
+  it('качалка строится только на своём месторождении и при наличии денег', () => {
+    const s = createNewGame(1);
+    const deposit = ownedDeposits(s)[0];
+    const plain = freeOwnedTile(s);
+    expect(build(s, 'pumpjack', plain.x, plain.y).ok).toBe(false);
+    expect(build(s, 'pumpjack', 0, 0).ok).toBe(false);
+    expect(build(s, 'tank', plain.x, plain.y).ok).toBe(false); // ещё не открыт
+    expect(build(s, 'pumpjack', deposit.x, deposit.y).ok).toBe(true);
+    expect(build(s, 'pumpjack', deposit.x, deposit.y).ok).toBe(false);
+    s.cash = 0;
+    const other = ownedDeposits(s)[1];
+    expect(build(s, 'pumpjack', other.x, other.y)).toEqual({ ok: false, reason: 'Недостаточно денег' });
+  });
+
+  it('стоимость растёт с количеством зданий', () => {
+    const s = createNewGame(1);
+    const first = buildCost(s, 'pumpjack');
+    const d = ownedDeposits(s)[0];
+    build(s, 'pumpjack', d.x, d.y);
+    expect(buildCost(s, 'pumpjack')).toBeGreaterThan(first);
+  });
+
+  it('снос возвращает половину вложений', () => {
+    const s = createNewGame(1);
+    const d = ownedDeposits(s)[0];
+    const cost = buildCost(s, 'pumpjack');
+    build(s, 'pumpjack', d.x, d.y);
+    const cashBefore = s.cash;
+    const id = s.buildings[1].id;
+    expect(demolish(s, id).ok).toBe(true);
+    expect(s.cash - cashBefore).toBe(Math.round(cost / 2));
+    expect(demolish(s, s.buildings[0].id).ok).toBe(false); // контора
+    expectBalanced(s);
+  });
+});
+
+describe('добыча и хранение', () => {
+  it('добыча не превышает ёмкость хранилища, качалка простаивает при заполнении', () => {
+    const s = createNewGame(3);
+    const d = ownedDeposits(s)[0];
+    build(s, 'pumpjack', d.x, d.y);
+    run(s, 600);
+    expect(s.oil).toBeCloseTo(HQ_STORAGE, 6);
+    expect(s.buildings[1].status).toBe('full');
+  });
+
+  it('добытое равно убыли запасов месторождений', () => {
+    const s = createNewGame(3);
+    const before = s.map.reserve.reduce((a, b) => a + b, 0);
+    for (const d of ownedDeposits(s).slice(0, 2)) build(s, 'pumpjack', d.x, d.y);
+    run(s, 100);
+    const after = s.map.reserve.reduce((a, b) => a + b, 0);
+    expect(before - after).toBeCloseTo(s.totals.produced, 6);
+    expect(s.totals.produced).toBeCloseTo(s.oil, 6);
+  });
+
+  it('месторождение истощается, добыча падает и останавливается', () => {
+    const s = createNewGame(3);
+    const d = ownedDeposits(s)[0];
+    const i = d.y * s.map.size + d.x;
+    s.map.reserve[i] = s.map.initial[i] = 5;
+    s.cash = 1e6;
+    build(s, 'pumpjack', d.x, d.y);
+    run(s, 120);
+    expect(s.map.reserve[i]).toBe(0);
+    expect(s.buildings[1].status).toBe('depleted');
+    expect(s.oil).toBeCloseTo(5, 6);
+  });
+});
+
+describe('продажи', () => {
+  it('ручная продажа идёт со скидкой перекупщика', () => {
+    const s = createNewGame(5);
+    s.oil = 50;
+    const price = s.market.price;
+    const r = sellManual(s);
+    expect(r.ok).toBe(true);
+    expect(s.oil).toBe(0);
+    expect(s.totals.revenue).toBeCloseTo(50 * price * MANUAL_SELL_FACTOR, 6);
+    expect(lastMinute(s).sold).toBe(50);
+    expectBalanced(s);
+  });
+
+  it('терминал продаёт автоматически и уважает минимальную цену', () => {
+    const s = createNewGame(5);
+    s.unlocked.push('terminal');
+    s.cash = 1e6;
+    const t = freeOwnedTile(s);
+    build(s, 'terminal', t.x, t.y);
+    s.oil = 50;
+    setSellThreshold(s, 1000);
+    run(s, 5);
+    expect(s.oil).toBe(50);
+    expect(s.buildings[1].status).toBe('waiting_price');
+    setSellThreshold(s, 0);
+    run(s, 5);
+    expect(s.oil).toBeCloseTo(45, 6);
+    expectBalanced(s, 1e6);
+  });
+});
+
+describe('земля и улучшения', () => {
+  it('покупать можно только соседние участки', () => {
+    const s = createNewGame(2);
+    s.cash = 1e6;
+    expect(buyParcel(s, 0, 0).ok).toBe(false);
+    expect(buyParcel(s, START_PARCEL.px + 1, START_PARCEL.py).ok).toBe(true);
+    expect(buyParcel(s, START_PARCEL.px + 2, START_PARCEL.py).ok).toBe(true);
+    expectBalanced(s, 1e6);
+  });
+
+  it('улучшение повышает уровень и ограничено максимумом', () => {
+    const s = createNewGame(2);
+    s.cash = 1e6;
+    const d = ownedDeposits(s)[0];
+    build(s, 'pumpjack', d.x, d.y);
+    const id = s.buildings[1].id;
+    expect(upgrade(s, id).ok).toBe(true);
+    expect(upgrade(s, id).ok).toBe(true);
+    expect(upgrade(s, id).ok).toBe(false);
+    expect(s.buildings[1].level).toBe(3);
+  });
+});
+
+describe('цели', () => {
+  it('продажа 100 баррелей открывает резервуар и даёт награду', () => {
+    const s = createNewGame(9);
+    const d = ownedDeposits(s)[0];
+    build(s, 'pumpjack', d.x, d.y);
+    tick(s, TICK);
+    expect(s.objectiveIndex).toBe(1);
+    s.oil = 100;
+    sellManual(s);
+    const events = tick(s, TICK);
+    expect(events.completed.map((o) => o.id)).toEqual(['first_sales']);
+    expect(s.unlocked).toContain('tank');
+    expectBalanced(s);
+  });
+});
+
+describe('детерминизм, сохранения, офлайн', () => {
+  it('одинаковые действия дают одинаковый результат', () => {
+    const a = createNewGame(11);
+    const b = createNewGame(11);
+    for (const s of [a, b]) {
+      const d = ownedDeposits(s)[0];
+      build(s, 'pumpjack', d.x, d.y);
+      run(s, 300);
+    }
+    expect(a).toEqual({ ...b, savedAt: a.savedAt });
+  });
+
+  it('сохранение и загрузка без потерь', () => {
+    const s = createNewGame(13);
+    const d = ownedDeposits(s)[0];
+    build(s, 'pumpjack', d.x, d.y);
+    run(s, 30);
+    const loaded = deserialize(serialize(s));
+    expect(loaded).toEqual(s);
+  });
+
+  it('повреждённое сохранение отклоняется', () => {
+    expect(deserialize('{oops')).toBeNull();
+    expect(deserialize('{"version":1}')).toBeNull();
+    expect(deserialize('{"version":999}')).toBeNull();
+  });
+
+  it('офлайн-прогресс добывает нефть и сходится по деньгам', () => {
+    const s = createNewGame(17);
+    s.unlocked.push('terminal', 'tank');
+    s.cash = 1e5;
+    for (const d of ownedDeposits(s).slice(0, 3)) build(s, 'pumpjack', d.x, d.y);
+    const t = freeOwnedTile(s);
+    build(s, 'terminal', t.x, t.y);
+    const report = simulateOffline(s, 3600);
+    expect(report.seconds).toBe(3600);
+    expect(report.produced).toBeGreaterThan(1000);
+    expect(report.revenue).toBeGreaterThan(report.expenses);
+    expectBalanced(s, 1e5);
+  });
+});
+
+describe('прогноз истощения', () => {
+  it('совпадает с симуляцией', async () => {
+    const { timeToDeplete } = await import('../src/core');
+    const s = createNewGame(21);
+    s.unlocked.push('terminal');
+    s.cash = 1e6;
+    const d = ownedDeposits(s)[0];
+    const i = d.y * s.map.size + d.x;
+    s.map.reserve[i] = s.map.initial[i] = 40;
+    build(s, 'pumpjack', d.x, d.y);
+    const t = freeOwnedTile(s);
+    build(s, 'terminal', t.x, t.y); // терминал не даёт складу переполниться
+    const predicted = timeToDeplete(s, s.buildings[1]);
+    let elapsed = 0;
+    while (s.map.reserve[i] > 1e-6 && elapsed < 10_000) {
+      tick(s, TICK);
+      elapsed += TICK;
+    }
+    // Хвост истощения асимптотически не бесконечен (добыча не ниже 40%), поэтому прогноз точен до шага.
+    expect(Math.abs(elapsed - predicted)).toBeLessThan(predicted * 0.02 + 1);
+  });
+});
