@@ -322,25 +322,59 @@ export class Hud {
         if (up) up.disabled = s.cash < core.PIPES[2].cost - core.PIPES[1].cost;
       }
     } else if (sel?.kind === 'parcel') {
-      key = `p:${sel.px}:${sel.py}`;
-      const survey = core.parcelSurvey(s, sel.px, sel.py);
+      const est = core.parcelEstimate(s, sel.px, sel.py);
+      key = `p:${sel.px}:${sel.py}:${est.level}`;
       const priceValue = core.parcelPrice(s);
       const check = core.canBuyParcel(s, sel.px, sel.py);
+      const range = (r: { low: number; high: number } | null) => (!r ? '?' : r.low === r.high ? `${num(r.low)} барр.` : `${num(r.low)}–${num(r.high)} барр.`);
+      const levelText =
+        est.level >= core.SURVEY_EXACT
+          ? 'известно точно'
+          : est.level === 0
+            ? 'не разведан'
+            : `${core.SURVEY_LEVELS[est.level - 1].name.toLowerCase()} (точность ±${Math.round(core.SURVEY_LEVELS[est.level - 1].accuracy * 100)}%)`;
+      let body = kv('Разведка', levelText);
+      if (est.level === 0) {
+        body += `<div class="small" style="margin-top:4px">Запасы неизвестны. В среднем дальние участки богаче, но месторождения есть не везде. Разведка покажет, где нефть, и даст оценку запасов — диапазон, в котором точно лежит истинное значение.</div>`;
+      } else if ((est.tiles ?? 0) === 0) {
+        body += kv('Результат', 'нефти не обнаружено');
+      } else {
+        body += kv('Клеток с нефтью', num(est.tiles ?? 0)) + kv('Запасы', range(est.reserves));
+        if (est.light && est.heavy && (est.reserves?.high ?? 0) > 0) body += kv('Лёгкой / тяжёлой', `${range(est.light)} / ${range(est.heavy)}`);
+        else if ((est.reserves?.high ?? 0) > 0) body += `<div class="small">Сорт нефти покажет сейсморазведка.</div>`;
+        if ((est.heavy?.high ?? 0) > 0)
+          body += `<div class="small" style="margin-top:4px">Тяжёлая нефть дешевле (сейчас −${Math.round(core.heavySpread(s) * 100)}%), её месторождения крупнее; станки 1-го уровня качают её на ${Math.round((1 - core.GRADES[1].level1Rate) * 100)}% медленнее. Сорта не смешиваются: для тяжёлой нужен свой резервуар.</div>`;
+      }
       this.selectionInfo.innerHTML = `
         <div class="sel-title">Участок земли</div>
-        <div class="small" style="margin-bottom:8px">Покупка расширяет территорию компании. Тёмные пятна — разведанные месторождения.</div>
-        ${kv('Клеток с нефтью', num(survey.tiles))}
-        ${kv('Разведанные запасы', bbl(survey.reserves))}
-        ${survey.reserves > 0 ? kv('Из них лёгкой / тяжёлой', `${num(survey.light)} / ${num(survey.heavy)} барр.`) : ''}
-        ${survey.heavy > 0 ? `<div class="small" style="margin-top:4px">Тяжёлая нефть дешевле (сейчас −${Math.round(core.heavySpread(s) * 100)}%), её месторождения крупнее; станки 1-го уровня качают её на ${Math.round((1 - core.GRADES[1].level1Rate) * 100)}% медленнее. Сорта не смешиваются: для тяжёлой нужен свой резервуар.</div>` : ''}
+        <div class="small" style="margin-bottom:8px">Покупка расширяет территорию компании. После покупки запасы известны точно.</div>
+        ${body}
         ${kv('Цена', money(priceValue))}
         ${!check.ok ? `<div class="small" style="color:var(--bad);margin-top:6px">${check.reason}</div>` : ''}`;
       if (key !== this.selectionKey) {
+        const out: HTMLElement[] = [];
+        core.SURVEY_LEVELS.forEach((lv, i) => {
+          const level = i + 1;
+          if (est.level >= level || (est.level >= 1 && est.tiles === 0)) return;
+          const btn = el('button', '');
+          btn.dataset.role = `survey-${level}`;
+          btn.title = `${lv.name}: точность ±${Math.round(lv.accuracy * 100)}%${lv.grade ? ', сорт нефти' : ', где нефть'}`;
+          btn.onclick = () => this.game.surveyParcel(sel.px, sel.py, level);
+          out.push(btn);
+        });
         const buy = el('button', 'primary', 'Купить участок');
         buy.dataset.role = 'buy';
         buy.onclick = () => this.game.buyParcel(sel.px, sel.py);
-        this.selectionActions.replaceChildren(buy);
+        out.push(buy);
+        this.selectionActions.replaceChildren(...out);
       }
+      core.SURVEY_LEVELS.forEach((lv, i) => {
+        const btn = this.selectionActions.querySelector<HTMLButtonElement>(`[data-role=survey-${i + 1}]`);
+        if (!btn) return;
+        const cost = core.surveyCost(s, i + 1);
+        btn.textContent = `${lv.name} · ${money(cost)} — ±${Math.round(lv.accuracy * 100)}%${lv.grade ? ' и сорт' : ''}`;
+        btn.disabled = !core.canSurvey(s, sel.px, sel.py, i + 1).ok;
+      });
       (this.selectionActions.querySelector('[data-role=buy]') as HTMLButtonElement).disabled = !check.ok;
     }
     this.selectionKey = key;
@@ -593,8 +627,10 @@ export class Hud {
       const b = core.buildingAt(s, g.hover.x, g.hover.y);
       if (b) text = core.buildingName(b.type);
       else if (s.map.pipes[i] > 0) text = `${core.PIPES[s.map.pipes[i] as 1 | 2].name} — щёлкните, чтобы увидеть загрузку`;
+      else if (s.map.initial[i] > 0 && core.tileSurveyLevel(s, g.hover.x, g.hover.y) === 0) text = 'Чужой неразведанный участок — щёлкните, чтобы заказать разведку или узнать цену';
+      else if (s.map.initial[i] > 0 && core.tileSurveyLevel(s, g.hover.x, g.hover.y) < core.SURVEY_EXACT) text = 'Признаки нефти (по данным разведки) — оценка запасов в панели участка';
       else if (s.map.initial[i] > 0) text = `Месторождение (${core.GRADES[(s.map.grade[i] ?? 0) as 0 | 1].name.toLowerCase()} нефть): ${bbl(s.map.reserve[i])}${core.isTileOwned(s, g.hover.x, g.hover.y) ? ' — постройте качалку (1)' : ''}`;
-      else if (!core.isTileOwned(s, g.hover.x, g.hover.y)) text = 'Чужой участок — щёлкните, чтобы узнать цену';
+      else if (!core.isTileOwned(s, g.hover.x, g.hover.y)) text = 'Чужой участок — щёлкните, чтобы узнать цену и заказать разведку';
     }
     if (this.refs.hint.textContent !== text) this.refs.hint.textContent = text;
   }
@@ -634,6 +670,7 @@ export class Hud {
         <li><b>Продажа.</b> Вручную — перекупщику со скидкой 20%. Наливной терминал продаёт сам и по полной цене, можно задать минимальную цену.</li>
         <li><b>Сорта нефти.</b> Лёгкая продаётся по рыночной цене, тяжёлая — со скидкой, которая меняется (то больше, то почти исчезает); зато тяжёлые месторождения крупнее. Резервуар хранит один сорт — для тяжёлой нефти нужен свой.</li>
         <li><b>Рынок.</b> Цена колеблется. Резервуары позволяют придержать нефть до роста цены.</li>
+        <li><b>Разведка.</b> Запасы чужих участков не видны. Геологическая съёмка покажет, где нефть, и оценку запасов (±40%), сейсморазведка — точнее (±10%) и сорт. Своя земля известна точно.</li>
         <li><b>Развитие.</b> Улучшайте здания, покупайте соседние участки с новыми месторождениями.</li>
       </ul>
       <p class="small">Управление: перетаскивание или стрелки — камера, колесо — масштаб, 1/2/3 — строительство, 4/5 — трубы, X — демонтаж трубы, S — продать, пробел — пауза, Esc — отмена. Игра сохраняется автоматически и продолжает работать, пока вас нет (до 4 часов).</p>`,

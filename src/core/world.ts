@@ -1,4 +1,5 @@
-import { PARCEL_SIZE, PARCELS_PER_SIDE } from './config';
+import { PARCEL_SIZE, PARCELS_PER_SIDE, SURVEY_EXACT, SURVEY_LEVELS } from './config';
+import { Rng } from './rng';
 import type { Building, GameState } from './types';
 
 export function inBounds(s: GameState, x: number, y: number): boolean {
@@ -67,4 +68,63 @@ export function parcelSurvey(s: GameState, px: number, py: number): { tiles: num
     }
   }
   return { tiles, reserves, light, heavy };
+}
+
+/** Уровень разведки участка: свой участок всегда известен точно. */
+export function surveyLevel(s: GameState, px: number, py: number): number {
+  if (isParcelOwned(s, px, py)) return SURVEY_EXACT;
+  return s.map.survey?.[parcelIndex(px, py)] ?? SURVEY_EXACT;
+}
+
+/** Известно ли игроку, есть ли на клетке месторождение (для подсказок и отрисовки пятен). */
+export function tileSurveyLevel(s: GameState, x: number, y: number): number {
+  return surveyLevel(s, Math.floor(x / PARCEL_SIZE), Math.floor(y / PARCEL_SIZE));
+}
+
+export interface Range {
+  low: number;
+  high: number;
+}
+
+/** Оценка участка, которую видит игрок на текущем уровне разведки. */
+export interface ParcelEstimate {
+  level: number;
+  /** Клеток с нефтью — известно с геологической съёмки. */
+  tiles: number | null;
+  /** Запасы: точное значение (low = high) или диапазон; null — неизвестно. */
+  reserves: Range | null;
+  /** Запасы по сортам — с сейсморазведки. */
+  light: Range | null;
+  heavy: Range | null;
+}
+
+/**
+ * Диапазон оценки: смещение центра постоянно для участка и уровня (от seed), поэтому повторный взгляд
+ * не «перебрасывает кости»; полуширина — точность уровня; истинное значение всегда внутри диапазона.
+ */
+function estimateRange(s: GameState, px: number, py: number, level: number, salt: number, value: number): Range {
+  if (value <= 0) return { low: 0, high: 0 };
+  const acc = SURVEY_LEVELS[level - 1].accuracy;
+  const rng = new Rng(((s.seed * 73856093) ^ (px * 19349663) ^ (py * 83492791) ^ (level * 2654435761) ^ (salt * 40503)) >>> 0);
+  const shift = (rng.next() * 2 - 1) * acc * 0.8;
+  const round = (v: number) => Math.round(v / 100) * 100;
+  return { low: Math.max(0, round(value * (1 + shift - acc))), high: round(value * (1 + shift + acc)) };
+}
+
+export function parcelEstimate(s: GameState, px: number, py: number): ParcelEstimate {
+  const level = surveyLevel(s, px, py);
+  const truth = parcelSurvey(s, px, py);
+  if (level >= SURVEY_EXACT) {
+    const exact = (v: number): Range => ({ low: v, high: v });
+    return { level, tiles: truth.tiles, reserves: exact(truth.reserves), light: exact(truth.light), heavy: exact(truth.heavy) };
+  }
+  if (level <= 0) return { level, tiles: null, reserves: null, light: null, heavy: null };
+  const withGrade = SURVEY_LEVELS[level - 1].grade;
+  return {
+    level,
+    tiles: truth.tiles,
+    reserves: estimateRange(s, px, py, level, 0, truth.reserves),
+    light: withGrade ? estimateRange(s, px, py, level, 1, truth.light) : null,
+    heavy: withGrade ? estimateRange(s, px, py, level, 2, truth.heavy) : null,
+  };
 }

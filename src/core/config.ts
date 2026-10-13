@@ -151,3 +151,15 @@ export const PIPE_REFUND = 0.5;
 
 export const PARCEL_BASE_PRICE = 3000;
 export const PARCEL_PRICE_GROWTH = 1.7;
+
+/**
+ * Разведка чужих участков. Уровни: 0 — ничего не известно, 1 — геологическая съёмка, 2 — сейсморазведка;
+ * 3 — точно известно (свой участок или старое сохранение). Цена — доля текущей цены участка.
+ * accuracy — полуширина показываемого диапазона запасов (доля); истинное значение всегда внутри диапазона.
+ */
+export const SURVEY_LEVELS = [
+  { name: 'Геологическая съёмка', costShare: 0.1, accuracy: 0.4, grade: false },
+  { name: 'Сейсморазведка', costShare: 0.25, accuracy: 0.1, grade: true },
+] as const;
+/** Уровень «известно точно». */
+export const SURVEY_EXACT = 3;

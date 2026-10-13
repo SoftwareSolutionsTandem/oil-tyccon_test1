@@ -13,7 +13,11 @@ import {
   levelSpec,
   OBJECTIVES,
   PARCELS_PER_SIDE,
-  parcelSurvey,
+  parcelEstimate,
+  parcelPrice,
+  survey,
+  surveyCost,
+  surveyLevel,
   productionCapacity,
   sellManual,
   storageCapacity,
@@ -155,17 +159,32 @@ function decide(s: GameState): void {
   if (deposit) {
     if (s.cash >= buildCost(s, 'pumpjack')) buildConnected(s, 'pumpjack', deposit.x, deposit.y);
   } else {
-    let best: { px: number; py: number; reserves: number } | null = null;
-    for (let py = 0; py < PARCELS_PER_SIDE; py++) {
-      for (let px = 0; px < PARCELS_PER_SIDE; px++) {
-        if (!canBuyParcel({ ...s, cash: Infinity }, px, py).ok) continue;
-        // Тяжёлая нефть дешевле — её запасы бот ценит ниже.
-        const survey = parcelSurvey(s, px, py);
-        const reserves = survey.light + survey.heavy * 0.7;
-        if (!best || reserves > best.reserves) best = { px, py, reserves };
-      }
+    // Земля: сначала геологическая съёмка всех соседних участков (по одному за ход), затем сейсморазведка
+    // лучшего, если денег с запасом, и покупка по оценке. Тяжёлая нефть дешевле — её запасы бот ценит ниже.
+    const cands: Array<{ px: number; py: number }> = [];
+    for (let py = 0; py < PARCELS_PER_SIDE; py++)
+      for (let px = 0; px < PARCELS_PER_SIDE; px++) if (canBuyParcel({ ...s, cash: Infinity }, px, py).ok) cands.push({ px, py });
+    const unknown = cands.find((c) => surveyLevel(s, c.px, c.py) === 0);
+    if (unknown) {
+      if (s.cash >= surveyCost(s, 1)) survey(s, unknown.px, unknown.py, 1);
+      return;
     }
-    if (best) buyParcel(s, best.px, best.py);
+    const mid = (r: { low: number; high: number } | null) => (r ? (r.low + r.high) / 2 : 0);
+    const value = (c: { px: number; py: number }) => {
+      const e = parcelEstimate(s, c.px, c.py);
+      return e.light && e.heavy ? mid(e.light) + mid(e.heavy) * 0.7 : mid(e.reserves) * 0.85;
+    };
+    let best: { px: number; py: number; reserves: number } | null = null;
+    for (const c of cands) {
+      const reserves = value(c);
+      if (!best || reserves > best.reserves) best = { ...c, reserves };
+    }
+    if (!best) return;
+    if (surveyLevel(s, best.px, best.py) < 2 && s.cash >= parcelPrice(s) * 1.25 + surveyCost(s, 2)) {
+      survey(s, best.px, best.py, 2);
+      return;
+    }
+    buyParcel(s, best.px, best.py);
   }
 
   for (const b of s.buildings) {

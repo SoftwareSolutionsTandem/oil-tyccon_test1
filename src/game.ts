@@ -224,6 +224,13 @@ export class Game {
     this.renderer.manualSale();
   }
 
+  surveyParcel(px: number, py: number, level: number): void {
+    const cost = core.surveyCost(this.state, level);
+    const r = core.survey(this.state, px, py, level);
+    if (!r.ok) return this.onToast(r.reason, 'bad');
+    this.onToast(`${core.SURVEY_LEVELS[level - 1].name}: −${money(cost)}. Оценка — в панели участка`, 'good');
+  }
+
   buyParcel(px: number, py: number): void {
     const r = core.buyParcel(this.state, px, py);
     if (!r.ok) return this.onToast(r.reason, 'bad');

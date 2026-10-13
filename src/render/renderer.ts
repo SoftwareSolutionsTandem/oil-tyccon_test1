@@ -1,5 +1,6 @@
 import {
   canBuild,
+  tileSurveyLevel,
   pumpNeighbors,
   pumpOrientAt,
   type PumpOrient,
@@ -468,7 +469,7 @@ export class Renderer {
       for (let x = x0 - 1; x < x0 + CELL + 1; x++) {
         if (x < 0 || y < 0 || x >= n || y >= n) continue;
         const i = y * n + x;
-        if (s.map.initial[i] > 0) stains += Math.round((s.map.reserve[i] / s.map.initial[i]) * STAIN_LEVELS).toString(36);
+        if (s.map.initial[i] > 0) stains += Math.min(tileSurveyLevel(s, x, y), 2) + Math.round((s.map.reserve[i] / s.map.initial[i]) * STAIN_LEVELS).toString(36);
       }
     }
     let owned = '';
@@ -516,7 +517,11 @@ export class Renderer {
         if (x < 0 || y < 0 || x >= n || y >= n) continue;
         const i = y * n + x;
         if (s.map.initial[i] <= 0) continue;
-        const level = Math.round((s.map.reserve[i] / s.map.initial[i]) * STAIN_LEVELS) / STAIN_LEVELS;
+        // Чужая неразведанная земля пятен не показывает; после геологической съёмки видно, где нефть,
+        // но не насколько её много (ровные бледные пятна); сейсморазведка и своя земля — как есть.
+        const known = tileSurveyLevel(s, x, y);
+        if (known <= 0) continue;
+        const level = known === 1 ? 0.35 : Math.round((s.map.reserve[i] / s.map.initial[i]) * STAIN_LEVELS) / STAIN_LEVELS;
         const stain = this.stains[Math.floor(hash2(x, y, 3) * this.stains.length)];
         ctx.globalAlpha = 0.12 + 0.68 * level;
         const size = 1.4 + hash2(x, y, 8) * 0.4;

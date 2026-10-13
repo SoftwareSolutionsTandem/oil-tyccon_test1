@@ -1,7 +1,7 @@
 import { planAutoConnect } from './actions';
 import { bestConnect } from './connect';
 import { levelSpec } from './economy';
-import { PARCEL_SIZE } from './config';
+import { PARCEL_SIZE, SURVEY_EXACT } from './config';
 import { syncOil } from './network';
 import { isParcelOwned } from './world';
 import { createNewGame, SAVE_VERSION } from './state';
@@ -40,6 +40,9 @@ export function deserialize(json: string): GameState | null {
   else if (!Array.isArray(state.map.grade) || state.map.grade.length !== reference.map.grade.length) return null;
   if (s.version < 2) migrateV1(state, reference);
   else if (!Array.isArray(state.map.pipes) || state.map.pipes.length !== reference.map.pipes.length) return null;
+  // v3 → v4: разведка. Старые игры видели запасы всех участков бесплатно — это знание сохраняется («известно точно»).
+  if (s.version < 4) state.map = { ...state.map, survey: state.map.owned.map(() => SURVEY_EXACT) };
+  else if (!Array.isArray(state.map.survey) || state.map.survey.length !== reference.map.survey.length) return null;
   state.version = SAVE_VERSION;
   return state;
 }

@@ -40,6 +40,8 @@ export function createDemoState(): GameState {
   for (const b of ordered) if (b.type !== 'hq') core.autoConnect(s, b.id, 2);
   core.layPipes(s, core.pipePath([hx + 1, hy], [hx + 1, hy + 1]), 2);
   core.buyParcel(s, core.START_PARCEL.px + 1, core.START_PARCEL.py);
+  // Демо-сцена — эталон для сравнительных кадров: вся карта разведана, пятна месторождений видны.
+  s.map.survey = s.map.survey.map(() => core.SURVEY_EXACT);
   for (let i = 0; i < 1200; i++) core.tick(s, core.TICK);
   return s;
 }

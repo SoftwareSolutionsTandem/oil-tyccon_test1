@@ -1,9 +1,9 @@
-import { GRADES, HEAVY_CHANCE, HQ_POS, MAP_SIZE, MARKET, PARCEL_SIZE, PARCELS_PER_SIDE, START_CASH, START_PARCEL } from './config';
+import { GRADES, HEAVY_CHANCE, HQ_POS, SURVEY_EXACT, MAP_SIZE, MARKET, PARCEL_SIZE, PARCELS_PER_SIDE, START_CASH, START_PARCEL } from './config';
 import { emptyBucket } from './economy';
 import { Rng } from './rng';
 import type { GameState, WorldMap } from './types';
 
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 
 export function createNewGame(seed: number = (Math.random() * 2 ** 31) | 0): GameState {
   const map = generateMap(seed);
@@ -73,7 +73,9 @@ function generateMap(seed: number): WorldMap {
   decor[HQ_POS.y * size + HQ_POS.x] = 0;
 
   const grade = assignGrades(seed, reserve, size);
-  return { size, reserve, initial: [...reserve], decor, owned, pipes: new Array<number>(size * size).fill(0), grade };
+  // Стартовый участок известен точно, остальные не разведаны.
+  const survey = owned.map((o) => (o ? SURVEY_EXACT : 0));
+  return { size, reserve, initial: [...reserve], decor, owned, pipes: new Array<number>(size * size).fill(0), grade, survey };
 }
 
 /**

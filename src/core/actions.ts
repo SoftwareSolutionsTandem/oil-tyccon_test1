@@ -1,4 +1,4 @@
-import { BUILDINGS, MANUAL_SELL_FACTOR, PARCELS_PER_SIDE, PIPE_REFUND, PIPES } from './config';
+import { BUILDINGS, MANUAL_SELL_FACTOR, PARCELS_PER_SIDE, PIPE_REFUND, PIPES, SURVEY_EXACT, SURVEY_LEVELS } from './config';
 import {
   buildCost,
   demolishRefund,
@@ -19,6 +19,7 @@ import {
   isParcelOwned,
   isTileOwned,
   parcelIndex,
+  surveyLevel,
   tileIndex,
 } from './world';
 
@@ -216,6 +217,31 @@ export function buyParcel(s: GameState, px: number, py: number): ActionResult {
   s.cash -= price;
   s.totals.capex += price;
   s.map.owned[parcelIndex(px, py)] = true;
+  s.map.survey[parcelIndex(px, py)] = SURVEY_EXACT;
+  return OK;
+}
+
+/** Цена разведки участка до уровня level (1 — съёмка, 2 — сейсморазведка): доля текущей цены участка. */
+export function surveyCost(s: GameState, level: number): number {
+  return Math.round(parcelPrice(s) * SURVEY_LEVELS[level - 1].costShare);
+}
+
+export function canSurvey(s: GameState, px: number, py: number, level: number): ActionResult {
+  if (px < 0 || py < 0 || px >= PARCELS_PER_SIDE || py >= PARCELS_PER_SIDE) return fail('Нет такого участка');
+  if (level < 1 || level > SURVEY_LEVELS.length) return fail('Нет такого вида разведки');
+  if (surveyLevel(s, px, py) >= level) return fail('Уже разведано');
+  if (s.cash < surveyCost(s, level)) return fail('Недостаточно денег');
+  return OK;
+}
+
+/** Разведка чужого участка: деньги — во вложения (как земля и строительство). */
+export function survey(s: GameState, px: number, py: number, level: number): ActionResult {
+  const check = canSurvey(s, px, py, level);
+  if (!check.ok) return check;
+  const cost = surveyCost(s, level);
+  s.cash -= cost;
+  s.totals.capex += cost;
+  s.map.survey[parcelIndex(px, py)] = level;
   return OK;
 }
 
