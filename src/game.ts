@@ -158,6 +158,18 @@ export class Game {
     this.onToast(`Проложено ${plan.tiles.length} кл. трубы`, 'good');
   }
 
+  /** Вариант подключения из панели здания (кратчайший или отдельная ветка с учётом загрузки сети). */
+  connectOption(id: number, idx: number): void {
+    const o = core.connectOptions(this.state, id)[idx];
+    if (!o) return this.onToast('Вариант подключения устарел — выберите снова', 'bad');
+    const r = core.applyConnect(this.state, o);
+    if (!r.ok) return this.onToast(r.reason, 'bad');
+    const b = core.getBuilding(this.state, id);
+    if (b) this.renderer.floatText(b.x + 0.5, b.y + 0.5, `−${money(o.cost)}`, '#ff9d8a');
+    const extra = o.upgrades.length ? `, ${o.upgrades.length} кл. заменено магистралью` : '';
+    this.onToast(`Проложено ${o.tiles.length} кл. трубы${extra}`, 'good');
+  }
+
   /** Замена промысловых участков маршрута магистралью. */
   upgradeRoute(id: number): void {
     const plan = core.planRouteUpgrade(this.state, id);

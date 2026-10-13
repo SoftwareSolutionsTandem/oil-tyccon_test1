@@ -1,5 +1,6 @@
 import {
   autoConnect,
+  autoConnectBest,
   getNetwork,
   lastFlow,
   layPipes,
@@ -53,7 +54,9 @@ function freeTiles(s: GameState, deposit: boolean): Array<{ x: number; y: number
 /** Строит и сразу подключает трубой (как сделал бы игрок кнопкой «Подключить»). */
 function buildConnected(s: GameState, type: BuildableType, x: number, y: number): void {
   if (!build(s, type, x, y).ok) return;
-  autoConnect(s, s.buildings[s.buildings.length - 1].id);
+  const id = s.buildings[s.buildings.length - 1].id;
+  // Как игрок, который видит расчётный поток вариантов: берёт тот, где нефти больше.
+  if (!autoConnectBest(s, id).ok) autoConnect(s, id);
 }
 
 /** Свободная клетка под резервуар/терминал, ближайшая к точке (x, y). */

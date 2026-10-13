@@ -1,4 +1,5 @@
 import { planAutoConnect } from './actions';
+import { bestConnect } from './connect';
 import { levelSpec } from './economy';
 import { syncOil } from './network';
 import { createNewGame, SAVE_VERSION } from './state';
@@ -52,14 +53,24 @@ function migrateV1(s: GameState, reference: GameState): void {
   const cap = storages.reduce((sum, b) => sum + levelSpec(b).value, 0);
   for (const b of storages) b.stored = cap > 0 ? (s.oil * levelSpec(b).value) / cap : 0;
   const order = [...s.buildings].sort((a, b) => a.id - b.id);
-  for (const type of ['tank', 'pumpjack', 'terminal'] as const) {
+  for (const type of ['tank', 'terminal', 'pumpjack'] as const) {
     for (const b of order) {
       if (b.type !== type) continue;
       // Магистралью: старое предприятие не должно внезапно упереться в пропускную способность труб,
-      // которые игрок не прокладывал. Дальше он развивает сеть уже по новым правилам.
-      const plan = planAutoConnect({ ...s, cash: Infinity }, b.id, 2);
-      if (!plan.ok) continue; // уже подключено или нет пути по своей земле — интерфейс покажет предупреждение
-      for (const [x, y] of plan.tiles) {
+      // которые игрок не прокладывал. Качалки — вариантом с наибольшим расчётным потоком: если кратчайшая труба
+      // привела бы в уже загруженный участок, прокладывается отдельная ветка (обычные трубы, без скрытых бонусов).
+      // Дальше игрок развивает сеть уже по новым правилам.
+      const free = { ...s, cash: Infinity };
+      let tiles: Array<[number, number]> = [];
+      if (type === 'pumpjack') {
+        const opt = bestConnect(free, b.id, 2);
+        if (opt) tiles = [...opt.tiles, ...opt.upgrades];
+      } else {
+        const plan = planAutoConnect(free, b.id, 2);
+        if (plan.ok) tiles = plan.tiles;
+      }
+      // Пусто — уже подключено или нет пути по своей земле: интерфейс покажет предупреждение.
+      for (const [x, y] of tiles) {
         s.map.pipes[y * s.map.size + x] = 2;
         s.map.decor[y * s.map.size + x] = 0;
       }

@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyConnect,
   autoConnect,
+  connectOptions,
+  productionCapacity,
   build,
   componentOf,
   createNewGame,
@@ -10,6 +13,7 @@ import {
   HQ_POS,
   HQ_STORAGE,
   isConnected,
+  lastFlow,
   layPipes,
   manualSellable,
   pipePath,
@@ -26,6 +30,7 @@ import {
   type GameState,
 } from '../src/core';
 import { Rng } from '../src/core/rng';
+import { runBot } from './bot';
 
 /**
  * Полигон: стартовый участок (16..23) без случайных месторождений, контора в (17,17).
@@ -202,6 +207,101 @@ describe('пропускная способность', () => {
     expect([...b.map.reserve]).toEqual([...a.map.reserve]);
   });
 });
+
+describe('подключение с учётом загрузки сети', () => {
+  /** Перегруженная промысловая линия у конторы: 4 качалки 3-го ур. (2,6 барр./с) на трубе 2 барр./с. */
+  function overloaded() {
+    const s = field();
+    layPipes(s, pipePath([HX, HY + 1], [HX + 5, HY + 1]), 1);
+    const ps = [HX + 2, HX + 4].flatMap((x) => [pump(s, x, HY), pump(s, x, HY + 2)]);
+    for (const p of ps) p.level = 3;
+    run(s, 2);
+    expect(ps.every((p) => p.status === 'throttled')).toBe(true);
+    return s;
+  }
+
+  it('кратчайшая труба в перегруженную сеть дала бы мало; предлагается отдельная ветка с полным потоком', () => {
+    const s = overloaded();
+    const p = pump(s, HX + 4, HY + 4);
+    p.level = 3;
+    const opts = connectOptions(s, p.id);
+    const short = opts.find((o) => o.kind === 'short')!;
+    const branch = opts.find((o) => o.kind === 'branch')!;
+    expect(short).toBeTruthy();
+    expect(branch).toBeTruthy();
+    expect(short.predicted).toBeLessThan(short.want * 0.9);
+    expect(branch.predicted).toBeGreaterThan(branch.want * 0.95);
+    expect(branch.total).toBeGreaterThan(short.total);
+    // Пропускная способность не увеличивается скрыто: ветка — обычные трубы за обычную цену.
+    const cash = s.cash;
+    expect(applyConnect(s, branch).ok).toBe(true);
+    expect(cash - s.cash).toBe(branch.cost);
+    expect(branch.cost).toBe(branch.tiles.length * PIPES[1].cost + branch.upgrades.length * (PIPES[2].cost - PIPES[1].cost));
+    const before = s.totals.produced;
+    run(s, 10);
+    expect(p.status).toBe('ok');
+    expect((s.totals.produced - before) / 10).toBeGreaterThan(PIPES[1].capacity + 0.6);
+    expectOilConserved(s);
+  });
+
+  it('уже подключённой качалке, упёршейся в трубу, предлагается разгрузка отдельной веткой', () => {
+    const s = overloaded();
+    const p = s.buildings.find((b) => b.type === 'pumpjack' && b.x === HX + 4 && b.y === HY + 2)!;
+    const opts = connectOptions(s, p.id);
+    expect(opts.some((o) => o.kind === 'short')).toBe(false);
+    const branch = opts.find((o) => o.kind === 'branch');
+    expect(branch).toBeTruthy();
+    expect(branch!.predicted).toBeGreaterThan(lastFlowOf(s, p.id) + 0.05);
+  });
+
+  it('альтернативная ветка: после насыщения кратчайшего пути нефть идёт в обход по другой трубе', () => {
+    const make = (bypass: boolean) => {
+      const s = overloaded();
+      // Обход: от конторы с другой стороны (через x = HX−1) до дальнего конца линии.
+      if (bypass) {
+        layPipes(s, pipePath([HX - 1, HY], [HX - 1, HY + 3]), 1);
+        layPipes(s, pipePath([HX, HY + 3], [HX + 5, HY + 3]), 1);
+        layPipes(s, [[HX + 5, HY + 2]], 1);
+      }
+      const before = s.totals.produced;
+      run(s, 10);
+      return { s, rate: (s.totals.produced - before) / 10 };
+    };
+    const single = make(false);
+    const both = make(true);
+    expect(single.rate).toBeLessThanOrEqual(PIPES[1].capacity + 1e-6);
+    // Обход забирает почти всё: 2,45 из 2,6 барр./с. Недобор — у качалки, чей единственный вход в сеть —
+    // насыщенная клетка основной линии (честное ограничение, а не ошибка распределения).
+    expect(both.rate).toBeGreaterThan(single.rate + 0.4);
+    expect(both.s.buildings.filter((b) => b.type === 'pumpjack' && b.status === 'ok').length).toBe(3);
+    expectOilConserved(both.s);
+  });
+
+  it('миграция крупного предприятия не сводит сеть в одну перегруженную клетку', () => {
+    // Крупное предприятие (40 минут игры бота) переводится в формат v1: без труб, нефть в общем пуле.
+    const s = createNewGame(3);
+    runBot(s, 40);
+    const old = JSON.parse(serialize(s));
+    old.version = 1;
+    delete old.map.pipes;
+    for (const b of old.buildings) delete b.stored;
+    const migrated = deserialize(JSON.stringify(old))!;
+    const pumps = migrated.buildings.filter((b) => b.type === 'pumpjack' && b.enabled);
+    expect(pumps.length).toBeGreaterThan(15);
+    // Меряем трубы: хранилища пусты, места хватает — добыча должна идти почти на полную мощность.
+    for (const b of migrated.buildings) if (b.type === 'hq' || b.type === 'tank') b.stored = 0;
+    syncOil(migrated);
+    const cap = productionCapacity(migrated);
+    const before = migrated.totals.produced;
+    run(migrated, 5);
+    expect((migrated.totals.produced - before) / 5).toBeGreaterThan(cap * 0.95);
+    expect(migrated.buildings.filter((b) => b.status === 'throttled').length).toBe(0);
+  }, 30_000);
+});
+
+function lastFlowOf(s: GameState, id: number): number {
+  return lastFlow(s)?.clients.get(id)?.actual ?? 0;
+}
 
 describe('хранилища', () => {
   it('заполненное хранилище сети останавливает добычу этой сети', () => {

@@ -447,13 +447,17 @@ export class Hud {
     up.onclick = () => this.game.upgrade(b.id);
     out.push(up);
     if (b.type === 'pumpjack' || b.type === 'terminal') {
-      const connect = el('button', 'primary');
-      connect.dataset.role = 'connect';
-      connect.onclick = () => this.game.connect(b.id);
+      // До двух вариантов подключения: кратчайший и отдельная ветка (с расчётным потоком).
+      for (const idx of [0, 1]) {
+        const connect = el('button', idx === 0 ? 'primary' : '');
+        connect.dataset.role = `option-${idx}`;
+        connect.onclick = () => this.game.connectOption(b.id, idx);
+        out.push(connect);
+      }
       const route = el('button');
       route.dataset.role = 'route';
       route.onclick = () => this.game.upgradeRoute(b.id);
-      out.push(connect, route);
+      out.push(route);
     }
     if (b.type === 'tank') {
       const connect = el('button');
@@ -496,6 +500,25 @@ export class Hud {
       if (plan && show) {
         connect.textContent = `${b.type === 'tank' ? 'Соединить с хранилищами' : 'Подключить трубой'} · ${plan.tiles.length} кл. · ${money(plan.cost)}`;
         connect.disabled = !plan.ok;
+      }
+    }
+    if (b.type === 'pumpjack' || b.type === 'terminal') {
+      // Варианты считаются, только когда они нужны: здание не подключено или упирается в трубу.
+      const opts = b.status === 'no_route' || b.status === 'throttled' ? core.connectOptions(s, b.id) : [];
+      for (const idx of [0, 1]) {
+        const btn = this.selectionActions.querySelector<HTMLButtonElement>(`[data-role=option-${idx}]`);
+        if (!btn) continue;
+        const o = opts[idx];
+        btn.style.display = o ? '' : 'none';
+        if (!o) continue;
+        const what = o.kind === 'short' ? 'Подключить трубой' : b.status === 'no_route' ? 'Отдельной веткой' : 'Разгрузить: отдельная ветка';
+        const tiles = `${o.tiles.length} кл.${o.upgrades.length ? ` + ${o.upgrades.length} замен на магистраль` : ''}`;
+        const flow = o.predicted >= o.want * 0.995 ? 'полный поток' : `поток ${num(o.predicted * 60)} из ${num(o.want * 60)} барр./мин`;
+        btn.textContent = `${what} · ${tiles} · ${money(o.cost)} — ${flow}`;
+        btn.disabled = !o.ok;
+        // Выделен вариант, где нефти больше (при равенстве — первый, он дешевле).
+        const best = opts.reduce((a, c, i) => (c.predicted > opts[a].predicted + 1e-6 ? i : a), 0);
+        btn.classList.toggle('primary', idx === best);
       }
     }
     const route = this.selectionActions.querySelector<HTMLButtonElement>('[data-role=route]');

@@ -39,9 +39,14 @@ export interface Network {
   /** Маршрут качалки к ближайшему хранилищу: клетки труб от качалки к хранилищу (пусто при прямом соседстве). */
   routes: Map<number, number[]>;
   /** Достижимые хранилища качалки или терминала по возрастанию длины пути, с маршрутами. */
-  reach: Map<number, Array<{ storage: Building; path: number[]; length: number }>>;
+  reach: Map<number, Array<{ storage: Building; si: number; path: number[]; length: number }>>;
+  /** Хранилища сети по номерам (si в reach) — для быстрых массивов в расчёте потока. */
+  storages: Building[];
   /** Зоны дренирования качалок (зависят только от расположения зданий — кешируются вместе с сетью). */
   drainage: Map<number, number[]>;
+  /** Данные для поиска обходов и кеш обходов по набору насыщенных труб. */
+  ctx: ReachContext;
+  detours: Map<string, Reach>;
 }
 
 /** Состояние потоков последнего тика — для интерфейса и отрисовки (не сохраняется). */
@@ -186,18 +191,46 @@ function buildNetwork(s: GameState, sig: number): Network {
     (b.type === 'pumpjack' ? components[best].pumps : components[best].terminals).push(b);
   }
 
-  // Достижимость: поиск в ширину по трубам от каждого хранилища отдельно (хранилищ немного).
-  // Хранилища работают как коллекторы — путь может проходить через них; через качалки и терминалы — нет.
-  // Так «одна сеть» всегда означает «всё в ней достижимо».
-  const routes = new Map<number, number[]>();
-  const reach = new Map<number, Array<{ storage: Building; path: number[]; length: number }>>();
-  const dist = new Int32Array(total);
-  const prev = new Int32Array(total);
+  const storages = s.buildings.filter(isStorage);
+  const ctx: ReachContext = { s, n, byTile, clients: [], storageIndex: new Map(storages.map((b, i) => [b, i])) };
   for (const comp of components) {
     if (comp.storages.length === 0) continue;
     const clients = clientsOf.get(comp.id) ?? [];
-    if (clients.length === 0) continue;
-    for (const st of comp.storages) {
+    if (clients.length) ctx.clients.push({ storages: comp.storages, clients });
+  }
+  const reach = computeReach(ctx, null);
+  const routes = new Map<number, number[]>();
+  for (const [id, list] of reach) routes.set(id, list[0].path);
+  const drainage = new Map<number, number[]>();
+  for (const b of s.buildings) if (b.type === 'pumpjack') drainage.set(b.id, drainageTiles(s, b));
+  return { sig, compOfTile, components, attach, routes, reach, storages, drainage, ctx, detours: new Map() };
+}
+
+type Reach = Map<number, Array<{ storage: Building; si: number; path: number[]; length: number }>>;
+
+/** Всё, что нужно для поиска маршрутов в сети: хранилища и примыкающие к ним клиенты по сетям. */
+interface ReachContext {
+  s: GameState;
+  n: number;
+  byTile: Map<number, Building>;
+  clients: Array<{ storages: Building[]; clients: Building[] }>;
+  storageIndex: Map<Building, number>;
+}
+
+/**
+ * Достижимость: поиск в ширину по трубам от каждого хранилища отдельно (хранилищ немного).
+ * Хранилища работают как коллекторы — путь может проходить через них; через качалки и терминалы — нет.
+ * blocked — клетки труб, через которые идти нельзя (насыщенные в текущем расчёте потока): так находятся обходы.
+ * Списки отсортированы: ближайшее хранилище первым, ничьи — по клетке хранилища (не по порядку зданий).
+ */
+function computeReach(ctx: ReachContext, blocked: Set<number> | null): Reach {
+  const { s, n, byTile } = ctx;
+  const total = n * n;
+  const reach: Reach = new Map();
+  const dist = new Int32Array(total);
+  const prev = new Int32Array(total);
+  for (const group of ctx.clients) {
+    for (const st of group.storages) {
       dist.fill(-1);
       const start = st.y * n + st.x;
       dist[start] = 0;
@@ -214,13 +247,13 @@ function buildNetwork(s: GameState, sig: number): Network {
           const j = ny * n + nx;
           if (dist[j] >= 0) continue;
           const nb = byTile.get(j);
-          if (nb ? !isStorage(nb) : s.map.pipes[j] <= 0) continue;
+          if (nb ? !isStorage(nb) : s.map.pipes[j] <= 0 || (blocked !== null && blocked.has(j))) continue;
           dist[j] = dist[i] + 1;
           prev[j] = i;
           queue.push(j);
         }
       }
-      for (const c of clients) {
+      for (const c of group.clients) {
         let entry = -1;
         for (let k = 0; k < 4; k++) {
           const x = c.x + SIDES[k];
@@ -236,18 +269,24 @@ function buildNetwork(s: GameState, sig: number): Network {
         for (let t = entry; t >= 0 && dist[t] > 0; t = prev[t]) if (s.map.pipes[t] > 0 && !byTile.has(t)) path.push(t);
         let list = reach.get(c.id);
         if (!list) reach.set(c.id, (list = []));
-        list.push({ storage: st, path, length: dist[entry] });
+        list.push({ storage: st, si: ctx.storageIndex.get(st)!, path, length: dist[entry] });
       }
     }
   }
-  for (const [id, list] of reach) {
-    // Ближайшее — первым; ничьи — по клетке хранилища (детерминированно, не по порядку зданий).
-    list.sort((a, b) => a.length - b.length || a.storage.y * n + a.storage.x - (b.storage.y * n + b.storage.x));
-    routes.set(id, list[0].path);
+  for (const list of reach.values()) list.sort((a, b) => a.length - b.length || a.storage.y * n + a.storage.x - (b.storage.y * n + b.storage.x));
+  return reach;
+}
+
+/** Маршруты в обход насыщенных труб (кешируются по набору насыщенных клеток — он стабилен от тика к тику). */
+function detourReach(net: Network, blocked: number[]): Reach {
+  const key = blocked.join(',');
+  let r = net.detours.get(key);
+  if (!r) {
+    if (net.detours.size > 16) net.detours.clear();
+    r = computeReach(net.ctx, new Set(blocked));
+    net.detours.set(key, r);
   }
-  const drainage = new Map<number, number[]>();
-  for (const b of s.buildings) if (b.type === 'pumpjack') drainage.set(b.id, drainageTiles(s, b));
-  return { sig, compOfTile, components, attach, routes, reach, drainage };
+  return r;
 }
 
 /** Сеть здания: для хранилища — его собственная, для качалки и терминала — та, к которой примыкает. */
@@ -292,7 +331,7 @@ const ROUNDS = 4;
 interface Client {
   b: Building;
   /** Достижимые хранилища по возрастанию длины пути. */
-  list: Array<{ storage: Building; path: number[] }>;
+  list: Array<{ storage: Building; si: number; path: number[] }>;
   /** Сколько ещё нужно перекачать за этот тик, барр. */
   need: number;
   /** Желаемый поток, барр./с. */
@@ -307,28 +346,43 @@ interface Client {
   deliveries: Map<Building, number>;
 }
 
+/** Рабочие массивы расчёта потока за тик (переиспользуются между тиками). */
+interface Scratch {
+  /** Остаток пропускной способности трубы за тик, NaN — труба в этом тике ещё не использовалась. */
+  spare: Float64Array;
+  /** Клетки, у которых spare задан. */
+  touched: number[];
+  load: Float64Array;
+}
+
 /**
  * Пропорциональное распределение за несколько раундов. В каждом раунде каждый клиент берёт ближайшее хранилище,
  * где ещё есть что взять (room), поток ограничивается остатком пропускной способности самой загруженной трубы
- * пути и долей хранилища; все применяются одновременно. Результат не зависит от порядка клиентов.
+ * пути и долей хранилища; все применяются одновременно. После насыщения труб следующий раунд ищет маршруты
+ * в обход них — так работают параллельные ветки и другие входы в хранилища. Результат не зависит от порядка клиентов.
  */
-function allocate(
-  clients: Client[],
-  room: Map<Building, number>,
-  spare: Map<number, number>,
-  cap: (tile: number) => number,
-  info: FlowInfo,
-  dt: number,
-): void {
+function allocate(net: Network, clients: Client[], room: Float64Array, sc: Scratch, cap: (tile: number) => number, info: FlowInfo, dt: number): void {
+  const { spare, touched, load } = sc;
+  const left = (t: number) => (spare[t] === spare[t] ? spare[t] : cap(t) * dt);
+  const asked = new Float64Array(room.length);
   for (let round = 0; round < ROUNDS; round++) {
-    const active: Array<{ c: Client; to: Building; path: number[]; amount: number }> = [];
+    const saturated: number[] = [];
+    for (const t of touched) if (spare[t] <= 1e-9) saturated.push(t);
+    saturated.sort((a, b) => a - b);
+    const reach = saturated.length ? detourReach(net, saturated) : net.reach;
+    const active: Array<{ c: Client; si: number; path: number[]; amount: number }> = [];
     for (const c of clients) {
       if (c.need <= 1e-9) continue;
-      // Ближайшее хранилище, где есть место (нефть) и путь к которому ещё не забит: так поток обходит
-      // перегруженную трубу по другой ветке сети, если она есть.
-      const to = c.list.find((r) => (room.get(r.storage) ?? 0) > 1e-9 && r.path.every((t) => (spare.has(t) ? spare.get(t)! : cap(t) * dt) > 1e-9));
+      c.list = reach.get(c.b.id) ?? [];
+      // Ближайшее хранилище, где есть место (нефть). Маршруты этого раунда уже обходят насыщенные трубы.
+      let to: Client['list'][number] | undefined;
+      for (const r of c.list)
+        if (room[r.si] > 1e-9) {
+          to = r;
+          break;
+        }
       if (!to) continue;
-      active.push({ c, to: to.storage, path: to.path, amount: c.need });
+      active.push({ c, si: to.si, path: to.path, amount: c.need });
       if (round === 0) {
         c.firstPath = to.path;
         c.firstStorage = to.storage.id;
@@ -336,15 +390,13 @@ function allocate(
     }
     if (!active.length) return;
     // Нагрузка труб в этом раунде и масштаб по самому узкому месту пути.
-    const load = new Map<number, number>();
-    for (const a of active) for (const t of a.path) load.set(t, (load.get(t) ?? 0) + a.amount);
-    if (round === 0) for (const [t, v] of load) info.demand[t] += v / dt;
+    for (const a of active) for (const t of a.path) load[t] += a.amount;
+    if (round === 0) for (const a of active) for (const t of a.path) info.demand[t] += a.amount / dt;
     for (const a of active) {
       let k = 1;
       let worst = -1;
       for (const t of a.path) {
-        const left = spare.has(t) ? spare.get(t)! : cap(t) * dt;
-        const q = left / load.get(t)!;
+        const q = left(t) / load[t];
         if (q < k) {
           k = q;
           worst = t;
@@ -356,29 +408,31 @@ function allocate(
         if (a.c.bottleneck < 0) a.c.bottleneck = worst;
       }
     }
+    for (const a of active) for (const t of a.path) load[t] = 0;
     // Доля хранилища: если просят больше, чем есть места (нефти), — пропорционально.
-    const asked = new Map<Building, number>();
-    for (const a of active) asked.set(a.to, (asked.get(a.to) ?? 0) + a.amount);
+    asked.fill(0);
+    for (const a of active) asked[a.si] += a.amount;
     let movedAny = false;
-    for (const a of active) {
-      const req = asked.get(a.to)!;
-      if (req > 0) a.amount *= Math.min(1, room.get(a.to)! / req);
-    }
+    for (const a of active) if (asked[a.si] > 0) a.amount *= Math.min(1, room[a.si] / asked[a.si]);
     for (const a of active) {
       if (a.amount <= 0) continue;
       movedAny = true;
-      room.set(a.to, Math.max(0, room.get(a.to)! - a.amount));
+      room[a.si] = Math.max(0, room[a.si] - a.amount);
       a.c.need -= a.amount;
       a.c.moved += a.amount;
-      a.c.deliveries.set(a.to, (a.c.deliveries.get(a.to) ?? 0) + a.amount);
+      const st = net.storages[a.si];
+      a.c.deliveries.set(st, (a.c.deliveries.get(st) ?? 0) + a.amount);
       for (const t of a.path) {
-        spare.set(t, Math.max(0, (spare.has(t) ? spare.get(t)! : cap(t) * dt) - a.amount));
+        if (spare[t] !== spare[t]) touched.push(t);
+        spare[t] = Math.max(0, left(t) - a.amount);
         info.actual[t] += a.amount / dt;
       }
     }
     if (!movedAny) return;
   }
 }
+
+const scratch = new WeakMap<GameState, Scratch>();
 
 /**
  * Один шаг логистики. Сначала терминалы забирают нефть из хранилищ (освобождая место), затем качалки качают
@@ -396,7 +450,13 @@ export function stepLogistics(s: GameState, dt: number, price: number, priceOk: 
   info.demand.fill(0);
   info.actual.fill(0);
   info.clients.clear();
-  const spare = new Map<number, number>();
+  let sc = scratch.get(s);
+  if (!sc || sc.spare.length !== total) {
+    sc = { spare: new Float64Array(total).fill(NaN), touched: [], load: new Float64Array(total) };
+    scratch.set(s, sc);
+  }
+  for (const t of sc.touched) sc.spare[t] = NaN;
+  sc.touched.length = 0;
   const cap = (t: number) => pipeCapacity(s.map.pipes[t]);
   const client = (b: Building, want: number): Client => ({
     b,
@@ -428,13 +488,13 @@ export function stepLogistics(s: GameState, dt: number, price: number, priceOk: 
     else if (!priceOk) b.status = 'waiting_price';
     else terms.push(client(b, levelSpec(b).value));
   }
-  const oil = new Map<Building, number>();
-  for (const st of s.buildings) if (isStorage(st)) oil.set(st, st.stored ?? 0);
-  allocate(terms, oil, spare, cap, info, dt);
+  const oil = new Float64Array(net.storages.length);
+  net.storages.forEach((st, i) => (oil[i] = st.stored ?? 0));
+  allocate(net, terms, oil, sc, cap, info, dt);
   let sold = 0;
   for (const c of terms) {
     sold += c.moved;
-    const oilLeft = c.list.some((r) => (oil.get(r.storage) ?? 0) > 1e-6);
+    const oilLeft = (net.reach.get(c.b.id) ?? []).some((r) => oil[r.si] > 1e-6);
     c.b.status = c.need <= 1e-6 ? 'ok' : c.piped && oilLeft ? 'throttled' : c.moved <= 1e-9 ? 'no_oil' : 'ok';
     record(c);
   }
@@ -456,9 +516,9 @@ export function stepLogistics(s: GameState, dt: number, price: number, priceOk: 
     else if (!net.reach.has(b.id)) b.status = 'no_route';
     else pumps.push({ ...client(b, Math.min(pool / dt, rateOf(b, pool, initial))), tiles, pool });
   }
-  const room = new Map<Building, number>();
-  for (const st of s.buildings) if (isStorage(st)) room.set(st, free(st));
-  allocate(pumps, room, spare, cap, info, dt);
+  const room = new Float64Array(net.storages.length);
+  net.storages.forEach((st, i) => (room[i] = free(st)));
+  allocate(net, pumps, room, sc, cap, info, dt);
   let produced = 0;
   for (const c of pumps) {
     // Извлечение из зоны дренирования пропорционально запасам клеток; ровно столько, сколько принято хранилищами.
@@ -478,7 +538,7 @@ export function stepLogistics(s: GameState, dt: number, price: number, priceOk: 
     c.moved = got;
     produced += got;
     // Недобор из-за трубы — только если в достижимых хранилищах осталось место; иначе причина — заполненный склад.
-    const roomLeft = c.list.some((r) => (room.get(r.storage) ?? 0) > 1e-6);
+    const roomLeft = (net.reach.get(c.b.id) ?? []).some((r) => room[r.si] > 1e-6);
     c.b.status = c.need <= 1e-6 * Math.max(1, c.want) ? 'ok' : c.piped && roomLeft ? 'throttled' : 'full';
     record(c);
   }
