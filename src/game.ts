@@ -170,6 +170,16 @@ export class Game {
     this.onToast(`Проложено ${o.tiles.length} кл. трубы${extra}`, 'good');
   }
 
+  refineryFeed(id: number, feed: core.Feed): void {
+    const r = core.setRefineryFeed(this.state, id, feed);
+    if (!r.ok) this.onToast(r.reason, 'bad');
+  }
+
+  refineryMarginOnly(id: number, on: boolean): void {
+    const r = core.setRefineryMarginOnly(this.state, id, on);
+    if (!r.ok) this.onToast(r.reason, 'bad');
+  }
+
   /** Замена промысловых участков маршрута магистралью. */
   upgradeRoute(id: number): void {
     const plan = core.planRouteUpgrade(this.state, id);

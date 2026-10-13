@@ -660,7 +660,7 @@ export class Renderer {
       if (view.selectedPipe) this.tileOutline(view.selectedPipe.x, view.selectedPipe.y, 'rgba(92,225,230,0.95)', 0.05);
       return;
     }
-    if (selected && (selected.type === 'pumpjack' || selected.type === 'terminal')) {
+    if (selected && (selected.type === 'pumpjack' || selected.type === 'terminal' || selected.type === 'refinery')) {
       const f = flow?.clients.get(selected.id);
       const path = f?.path ?? net.routes.get(selected.id);
       if (!path) return;

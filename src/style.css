@@ -130,3 +130,7 @@ input[type='range'] { width: 100%; accent-color: var(--accent); }
   pointer-events: none;
   background: radial-gradient(ellipse at center, rgba(10, 14, 20, 0) 55%, rgba(10, 14, 20, 0.42) 100%);
 }
+
+.row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 6px; }
+.row3 button.active { border-color: var(--accent); color: var(--accent); }
+label.check { display: flex; align-items: center; gap: 6px; font-size: 12px; margin: 4px 0 8px; cursor: pointer; }

@@ -4,7 +4,7 @@ import { isPipeTool, PIPE_TOOLS, type Game, type PipeTool, type ToastKind } from
 import { formatClock } from '../render/daylight';
 import { bbl, duration, money, num, price, rate } from './format';
 
-const BUILDABLE: BuildableType[] = ['pumpjack', 'tank', 'terminal'];
+const BUILDABLE: BuildableType[] = ['pumpjack', 'tank', 'terminal', 'refinery'];
 
 const STATUS_TEXT: Record<Building['status'], [string, 'ok' | 'warn' | 'bad']> = {
   ok: ['Работает', 'ok'],
@@ -273,6 +273,7 @@ export class Hud {
       kv('Добыто', rate(m.produced, 'барр.')) +
       kv('Продано', rate(m.sold, 'барр.')) +
       kv('Выручка', money(m.revenue)) +
+      (core.countOf(s, 'refinery') > 0 || t.refined > 0 ? kv('в т.ч. нефтепродукты', money(m.productRevenue)) + kv('Переработано', rate(m.refined, 'барр.')) : '') +
       kv('Расходы на содержание', money(-m.expenses)) +
       kv('Операционная прибыль', money(m.revenue - m.expenses), 'total') +
       '<div class="sep"></div>' +
@@ -384,6 +385,56 @@ export class Hud {
     this.selectionPanel.style.display = key ? '' : 'none';
   }
 
+  /** Панель НПЗ: загрузка, причины простоя, продукты, сравнение «продать или переработать». */
+  private refineryInfo(b: Building, head: string, upkeep: string): string {
+    const s = this.s;
+    const cap = core.levelSpec(b).value;
+    const f = core.lastFlow(s)?.clients.get(b.id);
+    const actual = f?.actual ?? 0;
+    const pcap = core.refineryProductCap(b);
+    const products = b.products ?? [0, 0, 0];
+    // Дополнительные причины (2.3 плана): основная — в статусе, остальные — строками «Также».
+    const also: string[] = [];
+    const plan = core.refineryPlan(s, b, 1);
+    if (b.status !== 'waiting_margin' && b.marginOnly !== false && plan.mask !== plan.filterMask) also.push('переработка одного из сортов сейчас невыгодна');
+    if (b.status !== 'product_full' && plan.limitedBy >= 0 && plan.need < cap * 0.999)
+      also.push(`склад «${core.PRODUCTS.names[plan.limitedBy].toLowerCase()}» почти заполнен — переработка ограничена`);
+    const productRows = [0, 1, 2]
+      .map((i) => {
+        const p = core.productPrice(s, i);
+        const prev = core.productPrice(s, i, s.time - 30, s.market.history[Math.max(0, s.market.history.length - 15)] ?? s.market.price);
+        const trend = p > prev + 0.3 ? '▲' : p < prev - 0.3 ? '▼' : '•';
+        const held = p < s.productThresholds[i] ? ' · <span style="color:var(--warn)">ждёт цену</span>' : '';
+        return kv(core.PRODUCTS.names[i], `${num(products[i])} / ${num(pcap)} · ${price(p)} ${trend}${held}`);
+      })
+      .join('');
+    const grades = ([0, 1] as const)
+      .map((g) => {
+        const crude = core.gradePrice(s, g);
+        const basket = core.basketValue(s, g);
+        const m = basket - crude;
+        return kv(`1 барр. ${core.GRADES[g].short}`, `продать ${price(crude)} / переработать ${price(basket)} <span style="color:${m > 0 ? 'var(--good)' : 'var(--bad)'}">(${m >= 0 ? '+' : '−'}${price(Math.abs(m))})</span>`);
+      })
+      .join('');
+    // Чистый результат при полной загрузке лучшим допустимым сортом (3.1 плана): мощность · маржа − содержание.
+    const allowed = ([0, 1] as const).filter((g) => (plan.filterMask >> g) & 1);
+    const best = Math.max(...allowed.map((g) => core.refineryMargin(s, g)));
+    const running = b.marginOnly === false || best > 0;
+    const net = ((running ? cap * best : 0) - core.levelSpec(b).upkeep) * 60;
+    return `${head}
+      ${also.map((a) => `<div class="small" style="color:var(--warn)">Также: ${a}</div>`).join('')}
+      ${kv('Переработка', `${rate(actual * 60)} из ${rate(cap * 60)} · ${Math.round((actual / cap) * 100)}%`)}
+      ${upkeep}
+      ${this.connectionInfo(b)}
+      <div class="sep"></div>
+      ${productRows}
+      ${kv('Отгрузка продуктов', `до ${rate(core.refineryShip(b) * 60)}`)}
+      <div class="sep"></div>
+      ${grades}
+      ${kv('При полной загрузке', `<span style="color:${net >= 0 ? 'var(--good)' : 'var(--bad)'}">${net >= 0 ? '+' : '−'}${money(Math.abs(net))}/мин</span>`)}
+      <div class="small">Сравнение с продажей той же нефти через терминал; содержание НПЗ учтено. Нефть забирается, только если продукты поместятся на склады; если склад одного продукта полон — завод стоит. Терминалы и НПЗ делят нефть пропорционально запросам.</div>`;
+  }
+
   /** Сорт нефти в хранилище (хранилище не смешивает сорта). */
   private storageGrade(b: Building): string {
     if ((b.stored ?? 0) <= 1e-6) return kv('Сорт', 'пусто — примет любой');
@@ -480,6 +531,7 @@ export class Hud {
       return `${head}${kv('В резервуаре', `${num(b.stored ?? 0)} / ${num(spec.value)} барр.`)}${this.storageGrade(b)}${upkeep}<div class="sep"></div>${this.networkSummary(core.componentOf(s, b))}${kv('Вся нефть компании', `${num(s.oil)} / ${num(core.storageCapacity(s))}`)}${next ? `<div class="sep"></div>${kv('След. уровень: ёмкость', bbl(next.value))}` : ''}
         <div class="small" style="margin-top:6px">Нефть хранится по месту: качалки сети заполняют сначала ближайшее хранилище. Сами резервуары между собой не перекачивают, но терминал забирает из ближайшего, где есть нефть. Резервуар хранит один сорт: пока в нём есть нефть, другой сорт сюда не пойдёт.</div>`;
     }
+    if (b.type === 'refinery') return this.refineryInfo(b, head, upkeep);
     return `${head}
       ${kv('Отгрузка', rate(spec.value * 60))}
       ${upkeep}
@@ -502,7 +554,7 @@ export class Hud {
     up.dataset.role = 'upgrade';
     up.onclick = () => this.game.upgrade(b.id);
     out.push(up);
-    if (b.type === 'pumpjack' || b.type === 'terminal') {
+    if (b.type === 'pumpjack' || b.type === 'terminal' || b.type === 'refinery') {
       // До двух вариантов подключения: кратчайший и отдельная ветка (с расчётным потоком).
       for (const idx of [0, 1]) {
         const connect = el('button', idx === 0 ? 'primary' : '');
@@ -520,6 +572,38 @@ export class Hud {
       connect.dataset.role = 'connect';
       connect.onclick = () => this.game.connect(b.id);
       out.push(connect);
+    }
+    if (b.type === 'refinery') {
+      // Сырьё: фильтр сорта и режим «только при выгоде».
+      const feeds = el('div', 'row3');
+      for (const [feed, label] of [['any', 'Любая'], ['light', 'Лёгкая'], ['heavy', 'Тяжёлая']] as const) {
+        const btn = el('button', '', label);
+        btn.dataset.role = `feed-${feed}`;
+        btn.title = 'Какой сорт нефти принимать';
+        btn.onclick = () => this.game.refineryFeed(b.id, feed);
+        feeds.append(btn);
+      }
+      const marginLabel = el('label', 'check');
+      const margin = el('input') as HTMLInputElement;
+      margin.type = 'checkbox';
+      margin.dataset.role = 'margin';
+      margin.onchange = () => this.game.refineryMarginOnly(b.id, margin.checked);
+      marginLabel.append(margin, document.createTextNode(' Только при выгоде (маржа > 0)'));
+      out.push(feeds, marginLabel);
+      // Пороги цены продуктов — общие для всех НПЗ.
+      for (let i = 0; i < 3; i++) {
+        const label = el('div', 'small');
+        label.dataset.role = `thr-label-${i}`;
+        const slider = el('input') as HTMLInputElement;
+        slider.type = 'range';
+        slider.min = '0';
+        slider.max = '160';
+        slider.step = '1';
+        slider.value = String(this.s.productThresholds[i]);
+        slider.title = `Минимальная цена продажи: ${core.PRODUCTS.names[i].toLowerCase()}`;
+        slider.oninput = () => core.setProductThreshold(this.s, i, Number(slider.value));
+        out.push(label, slider);
+      }
     }
     if (b.type === 'terminal') {
       const slider = el('input') as HTMLInputElement;
@@ -558,7 +642,18 @@ export class Hud {
         connect.disabled = !plan.ok;
       }
     }
-    if (b.type === 'pumpjack' || b.type === 'terminal') {
+    if (b.type === 'refinery') {
+      for (const feed of ['any', 'light', 'heavy']) {
+        this.selectionActions.querySelector(`[data-role=feed-${feed}]`)?.classList.toggle('active', (b.feed ?? 'any') === feed);
+      }
+      const margin = this.selectionActions.querySelector<HTMLInputElement>('[data-role=margin]');
+      if (margin) margin.checked = b.marginOnly !== false;
+      for (let i = 0; i < 3; i++) {
+        const label = this.selectionActions.querySelector<HTMLElement>(`[data-role=thr-label-${i}]`);
+        if (label) label.textContent = `Мин. цена: ${core.PRODUCTS.names[i].toLowerCase()} — ${s.productThresholds[i] > 0 ? price(s.productThresholds[i]) : 'любая'}`;
+      }
+    }
+    if (b.type === 'pumpjack' || b.type === 'terminal' || b.type === 'refinery') {
       // Варианты считаются, только когда они нужны: здание не подключено или упирается в трубу.
       const opts = b.status === 'no_route' || b.status === 'throttled' ? core.connectOptions(s, b.id) : [];
       for (const idx of [0, 1]) {
@@ -672,11 +767,12 @@ export class Hud {
         <li><b>Хранение.</b> Нефть копится на складе. Когда он полон, качалки простаивают, но содержание платить всё равно нужно.</li>
         <li><b>Продажа.</b> Вручную — перекупщику со скидкой 20%. Наливной терминал продаёт сам и по полной цене, можно задать минимальную цену.</li>
         <li><b>Сорта нефти.</b> Лёгкая продаётся по рыночной цене, тяжёлая — со скидкой, которая меняется (то больше, то почти исчезает); зато тяжёлые месторождения крупнее. Резервуар хранит один сорт — для тяжёлой нефти нужен свой.</li>
+        <li><b>НПЗ.</b> Открывается целью «Стабильная прибыль». Забирает нефть по трубам наравне с терминалами и сразу перерабатывает в бензин, дизель и мазут; продаёт их сам. Выгодно, когда продукты дороги относительно нефти; панель НПЗ сравнивает переработку с прямой продажей.</li>
         <li><b>Рынок.</b> Цена колеблется. Резервуары позволяют придержать нефть до роста цены.</li>
         <li><b>Разведка.</b> Запасы чужих участков не видны. Геологическая съёмка покажет, где нефть, и оценку запасов (±40%), сейсморазведка — точнее (±10%) и сорт. Своя земля известна точно.</li>
         <li><b>Развитие.</b> Улучшайте здания, покупайте соседние участки с новыми месторождениями.</li>
       </ul>
-      <p class="small">Управление: перетаскивание или стрелки — камера, колесо — масштаб, 1/2/3 — строительство, 4/5 — трубы, X — демонтаж трубы, S — продать, пробел — пауза, Esc — отмена. Игра сохраняется автоматически и продолжает работать, пока вас нет (до 4 часов).</p>`,
+      <p class="small">Управление: перетаскивание или стрелки — камера, колесо — масштаб, 1/2/3/6 — строительство, 4/5 — трубы, X — демонтаж трубы, S — продать, пробел — пауза, Esc — отмена. Игра сохраняется автоматически и продолжает работать, пока вас нет (до 4 часов).</p>`,
       [{ label: 'Начать', primary: true }],
     );
   }
