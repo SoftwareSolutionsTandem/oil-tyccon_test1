@@ -1,4 +1,7 @@
 import {
+  applyConnect,
+  connectOptions,
+  planRouteUpgrade,
   autoConnect,
   autoConnectBest,
   getNetwork,
@@ -26,21 +29,115 @@ import {
   TICK,
   upgrade,
   upgradeCost,
+  BUILDINGS,
+  lastMinute,
+  oilByGrade,
+  refineryCapacity,
+  refineryMargin,
+  setProductThreshold,
   type BuildableType,
   type GameState,
+  type TickEvents,
 } from '../src/core';
 
-/** Простой «жадный» игрок для проверки баланса: показывает, проходима ли игра и с каким темпом. */
-export function runBot(s: GameState, minutes: number): { reachedAt: Record<string, number>; minCash: number } {
+/**
+ * Простой «жадный» игрок для проверки баланса: показывает, проходима ли игра и с каким темпом.
+ * onTick — наблюдатель за каждым шагом (метрики баланс-прогона НПЗ), состояние не меняет.
+ */
+export function runBot(
+  s: GameState,
+  minutes: number,
+  onTick?: (ev: TickEvents, s: GameState) => void,
+): { reachedAt: Record<string, number>; minCash: number } {
   const reachedAt: Record<string, number> = {};
   let minCash = s.cash;
   const steps = Math.round((minutes * 60) / TICK);
   for (let i = 0; i < steps; i++) {
-    for (const o of tick(s, TICK).completed) reachedAt[o.id] = s.time;
+    const ev = tick(s, TICK);
+    for (const o of ev.completed) reachedAt[o.id] = s.time;
+    onTick?.(ev, s);
     minCash = Math.min(minCash, s.cash);
     if (i % 10 === 0) decide(s);
   }
   return { reachedAt, minCash };
+}
+
+/** Сорта нефти, которые сейчас есть в хранилищах компании (битовая маска). */
+function presentGrades(s: GameState): number {
+  const [light, heavy] = oilByGrade(s);
+  return (light > 1 ? 1 : 0) | (heavy > 1 ? 2 : 0);
+}
+
+/**
+ * НПЗ (раздел 8 плана). Строит первый НПЗ, только если: он открыт и денег не меньше 1,5 его цены; добыча за минуту
+ * не меньше 1,5 мощности 1-го уровня; клетка рядом с хранилищем даёт по пробной работе на копии состояния (10 с обычной
+ * симуляции: фактические запасы, добыча, конкуренция терминалов, трубы) не меньше 75% мощности; у какого-то из
+ * имеющихся сортов маржа по базовым ценам положительна. Продукты не держит (пороги 0), флажок маржи не снимает.
+ * Улучшает НПЗ, если загрузка выше 90% две проверки подряд, маржа доступного сорта положительна и денег с запасом.
+ */
+const refineryBusy = new WeakMap<GameState, number>();
+/** Длительность пробной работы НПЗ на копии состояния при выборе места, с. */
+const TRIAL_SECONDS = 10;
+
+export function manageRefinery(s: GameState): void {
+  if (!s.unlocked.includes('refinery')) return;
+  const refineries = s.buildings.filter((b) => b.type === 'refinery');
+  const present = presentGrades(s) || 1;
+  const marginOk = ([0, 1] as const).some((g) => ((present >> g) & 1) === 1 && refineryMargin(s, g, false) > 0);
+  if (refineries.length === 0) {
+    const cost = buildCost(s, 'refinery');
+    if (s.cash < cost * 1.5 || !marginOk) return;
+    const cap1 = BUILDINGS.refinery.levels[0].value;
+    // Нефти в целом должно хватать: НПЗ делит её с терминалами пропорционально запросам, поэтому «остаток после
+    // терминалов» не нужен — его фактическую долю проверяет пробный расчёт ниже (не меньше 75% мощности).
+    if (lastMinute(s).produced / 60 < cap1 * 1.5) return;
+    // Клетки рядом с хранилищами: пробный расчёт потока на копии состояния — берём лучшую.
+    let best: { x: number; y: number; flow: number } | null = null;
+    for (const st of s.buildings) {
+      if (st.type !== 'hq' && st.type !== 'tank') continue;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const x = st.x + dx;
+        const y = st.y + dy;
+        if (!canBuild({ ...s, cash: Infinity }, 'refinery', x, y).ok) continue;
+        // Пробная работа на копии: 10 с обычной симуляции (добыча, терминалы, трубы) с фактическими запасами.
+        // Нефть лежит не везде поровну, и НПЗ полезен там, куда она реально доходит; средний поток за 10 с
+        // честнее одного шага, когда терминалы держат хранилища почти пустыми.
+        const copy: GameState = structuredClone(s);
+        copy.cash = Infinity;
+        if (!build(copy, 'refinery', x, y).ok) continue;
+        const r = copy.buildings[copy.buildings.length - 1];
+        r.marginOnly = false;
+        let refined = 0;
+        for (let k = 0; k < TRIAL_SECONDS; k++) refined += tick(copy, 1).refined;
+        const flow = refined / TRIAL_SECONDS;
+        if (!best || flow > best.flow) best = { x, y, flow };
+      }
+    }
+    if (!best || best.flow < cap1 * 0.75) return;
+    build(s, 'refinery', best.x, best.y);
+    return;
+  }
+  for (const r of refineries) {
+    // Склад продукта полон — продукт продаётся сразу (порог 0).
+    if (r.status === 'product_full') for (let i = 0; i < 3; i++) setProductThreshold(s, i, 0);
+    // НПЗ упирается в трубу — как игрок кнопками панели: отдельная ветка, если она даёт больше, иначе магистраль.
+    if (r.status === 'throttled') {
+      const branch = connectOptions(s, r.id, 2).find((o) => o.kind === 'branch' && o.ok);
+      if (branch && s.cash >= branch.cost * 2) applyConnect(s, branch);
+      else {
+        const plan = planRouteUpgrade(s, r.id);
+        if (plan.ok && s.cash >= plan.cost * 2) layPipes(s, plan.tiles, 2);
+      }
+    }
+    const cap = levelSpec(r).value;
+    const busy = lastMinute(s).refined / 60 >= cap * 0.9 ? (refineryBusy.get(s) ?? 0) + 1 : 0;
+    refineryBusy.set(s, busy);
+    const c = upgradeCost(r);
+    if (c !== null && busy >= 2 && marginOk && s.cash >= c * 1.5) {
+      upgrade(s, r.id);
+      refineryBusy.set(s, 0);
+    }
+  }
 }
 
 function freeTiles(s: GameState, deposit: boolean): Array<{ x: number; y: number; reserve: number }> {
@@ -138,7 +235,8 @@ function decide(s: GameState): void {
   if (s.cash < 0 && s.oil > 50) sellManual(s);
   if (stuck || (s.oil > cap * 0.9 && (!hasTerminal || terminalThroughput(s) < productionCapacity(s) * 0.5))) sellManual(s);
 
-  if (s.unlocked.includes('terminal') && terminalThroughput(s) < productionCapacity(s)) {
+  // Терминалам нужна мощность только на ту нефть, которую не забирает НПЗ.
+  if (s.unlocked.includes('terminal') && terminalThroughput(s) + refineryCapacity(s) < productionCapacity(s)) {
     const term = s.buildings.find((b) => b.type === 'terminal' && upgradeCost(b) !== null);
     if (term && s.cash >= upgradeCost(term)!) upgrade(s, term.id);
     else if (!term || countOf(s, 'terminal') === 0) {
@@ -154,6 +252,9 @@ function decide(s: GameState): void {
     const t = freeTiles(s, false)[0];
     if (t && s.cash >= buildCost(s, 'tank')) buildConnected(s, 'tank', t.x, t.y);
   }
+
+  // Раз в 10 решений (примерно раз в 10 с) — НПЗ: пробный расчёт мест дорогой.
+  if (Math.floor(s.time) % 10 === 0) manageRefinery(s);
 
   const deposit = freeTiles(s, true)[0];
   if (deposit) {
