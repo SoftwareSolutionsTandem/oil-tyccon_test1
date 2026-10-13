@@ -40,11 +40,32 @@ export function deserialize(json: string): GameState | null {
   else if (!Array.isArray(state.map.grade) || state.map.grade.length !== reference.map.grade.length) return null;
   if (s.version < 2) migrateV1(state, reference);
   else if (!Array.isArray(state.map.pipes) || state.map.pipes.length !== reference.map.pipes.length) return null;
+  if (s.version < 5) migrateV4(state, reference);
+  else if (!Array.isArray(state.productThresholds) || state.productThresholds.length !== 3) return null;
   // v3 → v4: разведка. Старые игры видели запасы всех участков бесплатно — это знание сохраняется («известно точно»).
   if (s.version < 4) state.map = { ...state.map, survey: state.map.owned.map(() => SURVEY_EXACT) };
   else if (!Array.isArray(state.map.survey) || state.map.survey.length !== reference.map.survey.length) return null;
   state.version = SAVE_VERSION;
   return state;
+}
+
+/** Индекс цели «Переработка» в цепочке (вставлена в v5 перед «Нефтяной компанией»). */
+const REFINING_OBJECTIVE = 10;
+
+/**
+ * v4 → v5: НПЗ. Новые поля учёта — нулевые, пороги продуктов — 0 (продавать сразу). В цепочку целей вставлена
+ * «Переработка» перед «Нефтяной компанией»: у тех, кто уже прошёл «Стабильную прибыль» (индекс ≥ 10), номер
+ * цели сдвигается на одну (новую цель пропускают, награды за неё нет), а НПЗ сразу открыт — как дала бы та цель.
+ */
+function migrateV4(s: GameState, reference: GameState): void {
+  s.totals = { ...reference.totals, ...s.totals, refined: 0, productsMade: [0, 0, 0], productsSold: [0, 0, 0], productRevenue: 0 };
+  s.productThresholds = [0, 0, 0];
+  const fix = (b: GameState['stats']['current']) => ({ ...b, refined: b.refined ?? 0, productRevenue: b.productRevenue ?? 0 });
+  s.stats = { ...s.stats, current: fix(s.stats.current), buckets: s.stats.buckets.map(fix) };
+  if (s.objectiveIndex >= REFINING_OBJECTIVE) {
+    s.objectiveIndex += 1;
+    if (!s.unlocked.includes('refinery')) s.unlocked = [...s.unlocked, 'refinery'];
+  }
 }
 
 /**

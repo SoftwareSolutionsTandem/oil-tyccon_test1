@@ -23,7 +23,7 @@ import { GroundDecals } from './ground';
 import { Camera, isoX, isoY, worldToTile } from './iso';
 import { proj, type ShadowShape, type Sprite } from './model';
 import { mipmap, mipmapBytes, mipmapFrame } from './mipmap';
-import { HQ_FLAG_TOP, HQ_WINDOWS, LIGHTS, pumpExhaust, tankDims, tankGauge, TRUCK_DUST, TRUCK_EXHAUST, TRUCK_LENGTH } from './models';
+import { HQ_FLAG_TOP, HQ_WINDOWS, LIGHTS, pumpExhaust, REFINERY_COLUMN_TOP, REFINERY_STACK_TOP, tankDims, tankGauge, TRUCK_DUST, TRUCK_EXHAUST, TRUCK_LENGTH } from './models';
 import { ParticleSystem } from './particles';
 import { createCanvas, hash2 } from './noise';
 import { SpriteLibrary } from './sprites';
@@ -861,6 +861,7 @@ export class Renderer {
     if (b.type === 'pumpjack') return []; // тень качалки динамическая, см. buildingItem
     if (b.type === 'tank') return [{ sprite: lib.tank(b.level), dx: 0 }];
     if (b.type === 'hq') return [{ sprite: lib.headquarters(), dx: 0 }];
+    if (b.type === 'refinery') return [{ sprite: lib.refinery(b.level), dx: 0 }];
     const parts = [
       { sprite: lib.terminalBack(b.level), dx: 0 },
       { sprite: lib.terminalFront(b.level), dx: 0 },
@@ -878,6 +879,8 @@ export class Renderer {
         return [() => this.blit(lib.pumpjack(b.level, this.pumpPhase.get(b.id) ?? hash2(x, y, 1) * 6, this.orientOf(b)), x, y)];
       case 'tank':
         return [() => this.blit(lib.tank(b.level), x, y), () => this.drawGauge(b, fill)];
+      case 'refinery':
+        return [() => this.blit(lib.refinery(b.level), x, y)];
       case 'hq':
         return [() => this.blit(lib.headquarters(), x, y), () => this.drawFlag(b)];
       case 'terminal': {
@@ -970,6 +973,11 @@ export class Renderer {
       }
     }
     if (b.type === 'hq') this.emitHqTrucks(b, simDt);
+    if (b.type === 'refinery' && (b.status === 'ok' || b.status === 'throttled') && simDt > 0) {
+      // Работающий НПЗ: дым печи и пар над колонной (те же частицы выхлопа, что и у машин).
+      this.particles.emit(1, [b.x + REFINERY_STACK_TOP[0], b.y + REFINERY_STACK_TOP[1], REFINERY_STACK_TOP[2]], 2.5, simDt, { size: 2.2, alpha: 0.6 });
+      this.particles.emit(1, [b.x + REFINERY_COLUMN_TOP[0], b.y + REFINERY_COLUMN_TOP[1], REFINERY_COLUMN_TOP[2]], 1.2, simDt, { size: 1.6, alpha: 0.45 });
+    }
     if (b.type === 'terminal') {
       let t = this.truckT.get(b.id) ?? 0;
       const moving = t >= TRUCK_LOAD;
@@ -1161,6 +1169,9 @@ export class Renderer {
       no_route: ['⌁', '#e0533d'],
       throttled: ['≈', '#d4a017'],
       wrong_grade: ['!', '#8a5a2b'],
+      product_full: ['!', '#e0533d'],
+      waiting_margin: ['$', '#d4a017'],
+      no_feed: ['…', '#7d8590'],
     };
     const badge = badges[b.status];
     if (!badge) return;

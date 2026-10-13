@@ -7,8 +7,14 @@ import type { GameState, Totals } from './types';
 
 export interface TickEvents {
   autoSold: number;
+  /** Вся автоматическая выручка шага: терминалы и нефтепродукты. */
   autoRevenue: number;
   completed: Objective[];
+  /** НПЗ за шаг: переработано (по сортам), ценность переработанной нефти по ценам сортов, выручка от продуктов. */
+  refined: number;
+  refinedByGrade: [number, number];
+  refinedValue: number;
+  productRevenue: number;
 }
 
 /** Один шаг симуляции. Чистая логика без DOM — её можно гонять в тестах и офлайн. */
@@ -27,6 +33,16 @@ export function tick(s: GameState, dt: number): TickEvents {
   s.totals.revenue += autoRevenue;
   recordStat(s, 'sold', autoSold);
   recordStat(s, 'revenue', autoRevenue);
+  // НПЗ: переработка и нефтепродукты (выручка от них уже в autoRevenue).
+  const t = s.totals;
+  t.refined += flow.refined;
+  t.productRevenue += flow.productRevenue;
+  for (let i = 0; i < 3; i++) {
+    t.productsMade[i] += flow.productsMade[i];
+    t.productsSold[i] += flow.productsSold[i];
+  }
+  recordStat(s, 'refined', flow.refined);
+  recordStat(s, 'productRevenue', flow.productRevenue);
 
   // 3. Содержание зданий.
   let upkeep = 0;
@@ -38,7 +54,15 @@ export function tick(s: GameState, dt: number): TickEvents {
 
   advanceStats(s, dt);
   const completed = checkObjectives(s);
-  return { autoSold, autoRevenue, completed };
+  return {
+    autoSold,
+    autoRevenue,
+    completed,
+    refined: flow.refined,
+    refinedByGrade: flow.refinedByGrade,
+    refinedValue: flow.refinedValue,
+    productRevenue: flow.productRevenue,
+  };
 }
 
 function updateMarket(s: GameState, dt: number): void {
@@ -63,6 +87,9 @@ export interface OfflineReport {
   sold: number;
   revenue: number;
   expenses: number;
+  /** Переработано на НПЗ, барр., и выручка от нефтепродуктов (входит в revenue). */
+  refined: number;
+  productRevenue: number;
   completed: Objective[];
 }
 
@@ -78,6 +105,8 @@ export function simulateOffline(s: GameState, seconds: number): OfflineReport {
     sold: s.totals.sold - before.sold,
     revenue: s.totals.revenue - before.revenue,
     expenses: s.totals.expenses - before.expenses,
+    refined: s.totals.refined - before.refined,
+    productRevenue: s.totals.productRevenue - before.productRevenue,
     completed,
   };
 }

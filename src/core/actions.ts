@@ -6,11 +6,12 @@ import {
   levelSpec,
   oilByGrade,
   parcelPrice,
+  productPrice,
   recordStat,
   upgradeCost,
 } from './economy';
 import { componentOf, getNetwork, lastFlow, syncOil } from './network';
-import type { ActionResult, BuildableType, GameState, Grade } from './types';
+import type { ActionResult, BuildableType, Feed, GameState, Grade } from './types';
 import {
   buildingAt,
   getBuilding,
@@ -105,6 +106,11 @@ export function build(s: GameState, type: BuildableType, x: number, y: number): 
   s.map.decor[tileIndex(s, x, y)] = 0;
   const b: GameState['buildings'][number] = { id: s.nextId++, type, x, y, level: 1, enabled: true, invested: cost, status: 'ok' };
   if (type === 'tank') b.stored = 0;
+  if (type === 'refinery') {
+    b.products = [0, 0, 0];
+    b.feed = 'any';
+    b.marginOnly = true;
+  }
   s.buildings.push(b);
   return OK;
 }
@@ -140,6 +146,8 @@ export function demolish(s: GameState, id: number): ActionResult {
   const refund = demolishRefund(b);
   s.cash += refund;
   s.totals.refunds += refund;
+  // НПЗ: остаток нефтепродуктов продаётся перекупщику по 80% цены — без потерь и с учётом как продажа.
+  if (b.type === 'refinery' && b.products) sellRefineryStock(s, b, MANUAL_SELL_FACTOR);
   const oil = b.stored ?? 0;
   const spill = b.type === 'tank' && oil > 0 ? spillRoom(s, b) : null;
   s.buildings = s.buildings.filter((other) => other.id !== id);
@@ -161,6 +169,47 @@ function spillRoom(s: GameState, b: GameState['buildings'][number]) {
     .filter((o) => o.id !== b.id && ((o.stored ?? 0) <= 1e-9 || (o.grade ?? 0) === g))
     .map((o) => ({ o, free: Math.max(0, levelSpec(o).value - (o.stored ?? 0)) }));
   return { targets, total: targets.reduce((a, t) => a + t.free, 0) };
+}
+
+/** Продажа всех запасов нефтепродуктов НПЗ по доле factor от цены (снос — перекупщику). */
+function sellRefineryStock(s: GameState, b: GameState['buildings'][number], factor: number): number {
+  let revenue = 0;
+  for (let i = 0; i < 3; i++) {
+    const amount = b.products![i];
+    if (amount <= 0) continue;
+    const r = amount * productPrice(s, i) * factor;
+    b.products![i] = 0;
+    s.totals.productsSold[i] += amount;
+    revenue += r;
+  }
+  s.cash += revenue;
+  s.totals.revenue += revenue;
+  s.totals.productRevenue += revenue;
+  recordStat(s, 'revenue', revenue);
+  recordStat(s, 'productRevenue', revenue);
+  return revenue;
+}
+
+/** Фильтр сырья НПЗ. */
+export function setRefineryFeed(s: GameState, id: number, feed: Feed): ActionResult {
+  const b = getBuilding(s, id);
+  if (!b || b.type !== 'refinery') return fail('Это не НПЗ');
+  b.feed = feed;
+  return OK;
+}
+
+/** Режим «только при положительной марже». */
+export function setRefineryMarginOnly(s: GameState, id: number, on: boolean): ActionResult {
+  const b = getBuilding(s, id);
+  if (!b || b.type !== 'refinery') return fail('Это не НПЗ');
+  b.marginOnly = on;
+  return OK;
+}
+
+/** Минимальная цена продажи нефтепродукта i — общая для всех НПЗ компании. */
+export function setProductThreshold(s: GameState, i: number, price: number): void {
+  if (i < 0 || i > 2) return;
+  s.productThresholds[i] = Math.max(0, Math.round(price));
 }
 
 export function toggleEnabled(s: GameState, id: number): ActionResult {

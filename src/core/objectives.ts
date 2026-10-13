@@ -87,10 +87,18 @@ export const OBJECTIVES: Objective[] = [
     title: 'Стабильная прибыль',
     description: 'Выйдите на операционную прибыль $6 000 в минуту.',
     reward: 5000,
+    unlocks: ['refinery'],
     progress: (s) => {
       const m = lastMinute(s);
       return { current: m.revenue - m.expenses, target: 6000 };
     },
+  },
+  {
+    id: 'refining',
+    title: 'Переработка',
+    description: 'Постройте НПЗ (6) и продайте 200 баррелей нефтепродуктов. Сравнивайте в панели НПЗ: продать нефть или переработать.',
+    reward: 5000,
+    progress: (s) => ({ current: s.totals.productsSold[0] + s.totals.productsSold[1] + s.totals.productsSold[2], target: 200 }),
   },
   {
     id: 'cash_500k',

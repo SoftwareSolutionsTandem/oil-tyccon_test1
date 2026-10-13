@@ -40,6 +40,10 @@ export class SpriteLibrary {
     );
   }
 
+  refinery(level: number): Sprite {
+    return this.get(`refinery:${level}`, () => this.bake((p) => models.refinery(p, level), this.grime, 0.45));
+  }
+
   tank(level: number): Sprite {
     return this.get(`tank:${level}`, () => this.bake((p) => models.tank(p, level), this.streaks, 0.55));
   }

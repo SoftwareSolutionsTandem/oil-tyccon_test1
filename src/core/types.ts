@@ -1,4 +1,4 @@
-export type BuildingType = 'hq' | 'pumpjack' | 'tank' | 'terminal';
+export type BuildingType = 'hq' | 'pumpjack' | 'tank' | 'terminal' | 'refinery';
 export type BuildableType = Exclude<BuildingType, 'hq'>;
 
 /**
@@ -8,8 +8,22 @@ export type BuildableType = Exclude<BuildingType, 'hq'>;
  * no_oil — терминалу нечего продавать; no_route — нет трубопровода к хранилищу;
  * wrong_grade — места в достижимых хранилищах нет для этого сорта (они заняты нефтью другого сорта);
  * throttled — добыча ограничена пропускной способностью трубопровода.
+ * НПЗ: no_feed — нет сырья подходящего сорта; waiting_margin — переработка сейчас невыгодна;
+ * product_full — нет места на складе нефтепродукта.
  */
-export type BuildingStatus = 'ok' | 'off' | 'depleted' | 'full' | 'waiting_price' | 'no_oil' | 'no_route' | 'throttled' | 'wrong_grade';
+export type BuildingStatus =
+  | 'ok'
+  | 'off'
+  | 'depleted'
+  | 'full'
+  | 'waiting_price'
+  | 'no_oil'
+  | 'no_route'
+  | 'throttled'
+  | 'wrong_grade'
+  | 'no_feed'
+  | 'waiting_margin'
+  | 'product_full';
 
 export interface Building {
   id: number;
@@ -26,7 +40,16 @@ export interface Building {
   stored?: number;
   /** Сорт нефти в хранилище (0 — лёгкая, 1 — тяжёлая); имеет смысл, пока stored > 0. Хранилище не смешивает сорта. */
   grade?: Grade;
+  /** НПЗ: запасы нефтепродуктов во внутренних складах [бензин, дизель, мазут], баррели. */
+  products?: [number, number, number];
+  /** НПЗ: какой сорт сырья принимать. */
+  feed?: Feed;
+  /** НПЗ: перерабатывать только сорта с положительной маржой. */
+  marginOnly?: boolean;
 }
+
+/** Фильтр сырья НПЗ. */
+export type Feed = 'any' | 'light' | 'heavy';
 
 /** Сорт нефти: 0 — лёгкая, 1 — тяжёлая. */
 export type Grade = 0 | 1;
@@ -58,6 +81,10 @@ export interface StatBucket {
   sold: number;
   revenue: number;
   expenses: number;
+  /** Переработано нефти на НПЗ, барр. */
+  refined: number;
+  /** Выручка от нефтепродуктов (входит и в revenue). */
+  productRevenue: number;
 }
 
 export interface Totals {
@@ -73,6 +100,13 @@ export interface Totals {
   refunds: number;
   /** Награды за цели. */
   rewards: number;
+  /** Переработано нефти на НПЗ, барр. (sold — только сырая нефть). */
+  refined: number;
+  /** Произведено и продано нефтепродуктов [бензин, дизель, мазут], барр. */
+  productsMade: [number, number, number];
+  productsSold: [number, number, number];
+  /** Выручка от нефтепродуктов (часть revenue). */
+  productRevenue: number;
 }
 
 export interface GameState {
@@ -96,6 +130,8 @@ export interface GameState {
   };
   /** Минимальная цена, при которой терминалы продают нефть автоматически. */
   sellThreshold: number;
+  /** Минимальные цены продажи нефтепродуктов [бензин, дизель, мазут] — общие для всех НПЗ компании. */
+  productThresholds: [number, number, number];
   unlocked: BuildableType[];
   /** Индекс текущей цели в списке OBJECTIVES. */
   objectiveIndex: number;

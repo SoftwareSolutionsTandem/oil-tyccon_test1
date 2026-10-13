@@ -326,6 +326,60 @@ export const TRUCK_LENGTH = 0.65;
 export const TRUCK_DUST: V3 = [0.04, 0.7, 0.02];
 
 /** Бензовоз, развёрнутый кабиной к −x (для выезда назад). Зеркалим по x: передние/задние детали меняются местами. */
+/** Окраска поясов мини-резервуаров НПЗ по продуктам: бензин, дизель, мазут. */
+const PRODUCT_BANDS: Material[] = [mat([214, 170, 40], 0.3, 20), mat([170, 52, 40], 0.3, 20), mat([46, 44, 42], 0.2, 14)];
+
+/** Верх ректификационной колонны и дымовой трубы НПЗ (для пара и дыма). */
+export const REFINERY_COLUMN_TOP: V3 = [0.62, 0.32, 1.08];
+export const REFINERY_STACK_TOP: V3 = [0.2, 0.2, 1.2];
+
+/**
+ * НПЗ на одной клетке: печь с дымовой трубой (дальний угол), ректификационная колонна с площадками,
+ * эстакада труб и три мини-резервуара продуктов с цветными поясами (ближний ряд). Старшие уровни — больше колонн.
+ * Порядок вызовов — от дальних деталей к ближним.
+ */
+export function refinery(p: ModelPainter, level: number): void {
+  const paint = mat([92, 104, 114], 0.3, 20);
+  // Бетонное основание.
+  p.box(0.04, 0.04, 0, 0.96, 0.96, 0.04, M.concrete);
+  // Трубчатая печь и дымовая труба с красно-белыми поясами.
+  p.box(0.08, 0.08, 0.04, 0.4, 0.34, 0.36, M.wall, M.roofGray);
+  p.face([[0.12, 0.341, 0.12], [0.36, 0.341, 0.12], [0.36, 0.341, 0.22], [0.12, 0.341, 0.22]], M.steelDark, [0, 1, 0]);
+  p.cylinder(0.2, 0.2, 0.36, 0.05, 0.84, M.steel);
+  for (const z of [0.86, 1.02]) p.cylinder(0.2, 0.2, z, 0.052, 0.06, M.red, null);
+  // Колонны: основная, на 2-м уровне вторая, на 3-м — третья (выше).
+  const columns: Array<[number, number, number, number]> = [[0.62, 0.32, 0.09, 1.04]];
+  if (level >= 2) columns.push([0.84, 0.24, 0.065, 0.78]);
+  if (level >= 3) columns.push([0.42, 0.56, 0.075, 1.18]);
+  columns.sort((a, b) => a[0] + a[1] - (b[0] + b[1]));
+  for (const [cx, cy, r, h] of columns) {
+    p.cylinder(cx, cy, 0.04, r + 0.03, 0.04, M.concrete);
+    p.cylinder(cx, cy, 0.08, r, h - 0.08, M.galvanized);
+    for (let z = 0.36; z < h - 0.1; z += 0.3) p.cylinder(cx, cy, z, r + 0.035, 0.018, M.steelDark);
+    p.cone(cx, cy, h, r, 0.06, M.steel);
+    // Шлемовая труба сверху колонны к эстакаде.
+    p.tube([cx, cy, h - 0.02], [cx, cy + r + 0.06, h - 0.02], 0.015, M.steel, 6);
+    p.tube([cx, cy + r + 0.06, h - 0.02], [cx, cy + r + 0.06, 0.2], 0.015, M.steel, 6);
+  }
+  // Эстакада: стойки и пучок труб от печи к колоннам и к резервуарам продуктов.
+  for (const [x, y] of [[0.3, 0.5], [0.6, 0.5], [0.9, 0.5]]) p.tube([x, y, 0.04], [x, y, 0.26], 0.012, paint, 6);
+  p.box(0.26, 0.46, 0.26, 0.94, 0.54, 0.28, M.steelDark);
+  for (const [dy, m] of [[-0.02, M.galvanized], [0.02, M.brand]] as const) p.tube([0.24, 0.5 + dy, 0.3], [0.96, 0.5 + dy, 0.3], 0.014, m, 8);
+  p.tube([0.36, 0.3, 0.22], [0.36, 0.5, 0.3], 0.016, M.galvanized, 8);
+  // Мини-резервуары продуктов: бензин, дизель, мазут.
+  const tanks: Array<[number, number]> = [
+    [0.22, 0.76],
+    [0.48, 0.8],
+    [0.76, 0.76],
+  ];
+  tanks.forEach(([cx, cy], i) => {
+    p.cylinder(cx, cy, 0.04, 0.11, 0.03, M.concrete);
+    p.cylinder(cx, cy, 0.07, 0.09, 0.2, M.tankWhite);
+    p.cylinder(cx, cy, 0.19, 0.092, 0.04, PRODUCT_BANDS[i], null);
+    p.cone(cx, cy, 0.27, 0.092, 0.03, mat([190, 192, 188], 0.2, 16));
+  });
+}
+
 export function truckReverse(p: ModelPainter): void {
   const X = (x: number) => TRUCK_LENGTH - x;
   for (const x of [0.1, 0.21, 0.5]) p.tube([X(x), 0.6, 0.06], [X(x), 0.64, 0.06], 0.058, M.rubber, 10);

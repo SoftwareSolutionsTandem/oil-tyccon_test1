@@ -1,5 +1,5 @@
-import { DEPLETION_MIN_FACTOR, PIPES } from './config';
-import { drainageTiles, gradePrice, levelSpec, nominalRate, pumpGrade } from './economy';
+import { DEPLETION_MIN_FACTOR, PIPES, REFINERY } from './config';
+import { drainageTiles, gradePrice, levelSpec, nominalRate, productPrice, pumpGrade, refineryMargin, refineryProductCap, refineryShip } from './economy';
 import type { Building, GameState, Grade } from './types';
 
 /**
@@ -23,6 +23,7 @@ export interface NetComponent {
   storages: Building[];
   pumps: Building[];
   terminals: Building[];
+  refineries: Building[];
   /** Суммарная ёмкость хранилищ сети. */
   capacity: number;
   /** Клетки труб сети. */
@@ -151,7 +152,7 @@ function buildNetwork(s: GameState, sig: number): Network {
     if (c === undefined) {
       c = components.length;
       rootToComp.set(r, c);
-      components.push({ id: c, storages: [], pumps: [], terminals: [], capacity: 0, pipeTiles: [] });
+      components.push({ id: c, storages: [], pumps: [], terminals: [], refineries: [], capacity: 0, pipeTiles: [] });
     }
     compOfTile[i] = c;
     const b = byTile.get(i);
@@ -166,7 +167,7 @@ function buildNetwork(s: GameState, sig: number): Network {
   const attach = new Map<number, number>();
   const clientsOf = new Map<number, Building[]>();
   for (const b of [...s.buildings].sort((a, c) => a.id - c.id)) {
-    if (b.type !== 'pumpjack' && b.type !== 'terminal') continue;
+    if (b.type !== 'pumpjack' && b.type !== 'terminal' && b.type !== 'refinery') continue;
     let best = -1;
     const seen = new Set<number>();
     for (let k = 0; k < 4; k++) {
@@ -188,7 +189,7 @@ function buildNetwork(s: GameState, sig: number): Network {
     }
     if (best < 0) continue;
     attach.set(b.id, best);
-    (b.type === 'pumpjack' ? components[best].pumps : components[best].terminals).push(b);
+    (b.type === 'pumpjack' ? components[best].pumps : b.type === 'terminal' ? components[best].terminals : components[best].refineries).push(b);
   }
 
   const storages = s.buildings.filter(isStorage);
@@ -344,8 +345,10 @@ interface Client {
   firstStorage: number;
   /** Сколько перекачано в каждое хранилище (из каждого — для терминала). */
   deliveries: Map<Building, number>;
-  /** Сорт нефти качалки; −1 — терминал (забирает любой сорт). */
+  /** Сорт нефти качалки; −1 — клиент, который забирает нефть (терминал, НПЗ). */
   grade: number;
+  /** Для забирающих клиентов: маска допустимых сортов (бит 0 — лёгкая, бит 1 — тяжёлая). */
+  mask: number;
 }
 
 /** Рабочие массивы расчёта потока за тик (переиспользуются между тиками). */
@@ -375,8 +378,9 @@ function allocate(
 ): void {
   const { spare, touched, load } = sc;
   const left = (t: number) => (spare[t] === spare[t] ? spare[t] : cap(t) * dt);
-  // Хранилище принимает нефть своего сорта; пустое (−1) — любого. Терминал (сорт −1) берёт из любого.
-  const fits = (c: Client, si: number) => c.grade < 0 || grades[si] < 0 || grades[si] === c.grade;
+  // Качалка: хранилище своего сорта или пустое (−1). Забирающий клиент (терминал, НПЗ): хранилище с нефтью
+  // сорта из его маски — у терминала это сорта не ниже порога цены, у НПЗ — фильтр сырья и маржа (2.1 плана).
+  const fits = (c: Client, si: number) => (c.grade >= 0 ? grades[si] < 0 || grades[si] === c.grade : grades[si] >= 0 && ((c.mask >> grades[si]) & 1) === 1);
   const asked = new Float64Array(room.length);
   const askedBy = [new Float64Array(room.length), new Float64Array(room.length)];
   for (let round = 0; round < ROUNDS; round++) {
@@ -464,7 +468,22 @@ const scratch = new WeakMap<GameState, Scratch>();
  * в хранилища. Пропускная способность трубы за тик общая: сначала её занимает отгрузка, остаток — добыча.
  * Добытое ровно равно убыли запасов месторождений и ровно попадает в хранилища; проданное ровно уходит из них.
  */
-export function stepLogistics(s: GameState, dt: number): { produced: number; sold: number; revenue: number } {
+export interface StepResult {
+  produced: number;
+  /** Продано сырой нефти через терминалы, барр. */
+  sold: number;
+  /** Вся выручка шага: нефть и нефтепродукты. */
+  revenue: number;
+  /** Переработано на НПЗ, барр.; по сортам; ценность переработанной нефти по ценам сортов (упущенная прямая продажа). */
+  refined: number;
+  refinedByGrade: [number, number];
+  refinedValue: number;
+  productsMade: [number, number, number];
+  productsSold: [number, number, number];
+  productRevenue: number;
+}
+
+export function stepLogistics(s: GameState, dt: number): StepResult {
   const net = getNetwork(s);
   const total = s.map.size * s.map.size;
   let info = flows.get(s);
@@ -495,6 +514,7 @@ export function stepLogistics(s: GameState, dt: number): { produced: number; sol
     firstStorage: -1,
     deliveries: new Map(),
     grade: -1,
+    mask: 0,
   });
   const record = (c: Client) =>
     info!.clients.set(c.b.id, {
@@ -509,21 +529,72 @@ export function stepLogistics(s: GameState, dt: number): { produced: number; sol
   const grades = new Int8Array(net.storages.length);
   net.storages.forEach((st, i) => (grades[i] = (st.stored ?? 0) > 1e-9 ? (st.grade ?? 0) : -1));
 
-  // 1. Отгрузка через терминалы. Порог цены проверяется для каждого сорта отдельно.
+  // 0. Продажа нефтепродуктов с НПЗ — до забора нефти, чтобы проданное освободило место в этом же шаге.
+  const productsSold: [number, number, number] = [0, 0, 0];
+  let productRevenue = 0;
+  const pPrice = [productPrice(s, 0), productPrice(s, 1), productPrice(s, 2)];
+  for (const b of s.buildings) {
+    if (b.type !== 'refinery' || !b.products) continue;
+    const sell = [0, 1, 2].map((i) => (b.enabled && pPrice[i] >= s.productThresholds[i] ? b.products![i] : 0));
+    const want = sell[0] + sell[1] + sell[2];
+    if (want <= 0) continue;
+    // Мощность отгрузки — общая на продукты; если продаваемого больше, она делится пропорционально запасам.
+    const k = Math.min(1, (refineryShip(b) * dt) / want);
+    for (let i = 0; i < 3; i++) {
+      const amount = sell[i] * k;
+      if (amount <= 0) continue;
+      b.products[i] -= amount;
+      if (b.products[i] < 1e-12) b.products[i] = 0;
+      productsSold[i] += amount;
+      productRevenue += amount * pPrice[i];
+    }
+  }
+
+  // 1. Забор нефти: терминалы и НПЗ — клиенты одного распределения, без приоритета по типу здания.
+  // Порог цены терминалов проверяется для каждого сорта; у НПЗ — фильтр сырья и маржа.
   const sellable = [gradePrice(s, 0) >= s.sellThreshold, gradePrice(s, 1) >= s.sellThreshold];
   const terms: Client[] = [];
+  const refs: Array<Client & { okMask: number; storageLimited: number }> = [];
   for (const b of s.buildings) {
-    if (b.type !== 'terminal') continue;
-    if (!b.enabled) b.status = 'off';
-    else if (!net.reach.has(b.id)) b.status = 'no_route';
-    else if (!sellable[0] && !sellable[1]) b.status = 'waiting_price';
-    else terms.push(client(b, levelSpec(b).value));
+    if (b.type === 'terminal') {
+      if (!b.enabled) b.status = 'off';
+      else if (!net.reach.has(b.id)) b.status = 'no_route';
+      else if (!sellable[0] && !sellable[1]) b.status = 'waiting_price';
+      else terms.push({ ...client(b, levelSpec(b).value), mask: (sellable[0] ? 1 : 0) | (sellable[1] ? 2 : 0) });
+      continue;
+    }
+    if (b.type !== 'refinery') continue;
+    if (!b.enabled) {
+      b.status = 'off';
+      continue;
+    }
+    if (!net.reach.has(b.id)) {
+      b.status = 'no_route';
+      continue;
+    }
+    if (!b.products) b.products = [0, 0, 0];
+    const reachable = net.reach.get(b.id)!;
+    // Сорта, нефть которых сейчас есть в достижимых хранилищах (без учёта насыщения труб).
+    let present = 0;
+    for (const r of reachable) if (grades[r.si] >= 0) present |= 1 << grades[r.si];
+    const plan = refineryPlan(s, b, dt, present);
+    // Порядок причин статуса (2.3 плана): сырьё → маржа → склад → труба.
+    const c = { ...client(b, levelSpec(b).value), mask: plan.mask, okMask: plan.filterMask, storageLimited: plan.limitedBy };
+    c.need = plan.need;
+    if ((plan.filterMask & present) === 0) b.status = 'no_feed';
+    else if ((plan.mask & present) === 0) b.status = 'waiting_margin';
+    else if (plan.need <= REFINERY.eps) b.status = 'product_full';
+    else {
+      refs.push(c);
+      continue;
+    }
+    record(c);
   }
   const oil = new Float64Array(net.storages.length);
-  net.storages.forEach((st, i) => (oil[i] = grades[i] >= 0 && sellable[grades[i]] ? (st.stored ?? 0) : 0));
-  allocate(net, terms, oil, grades, sc, cap, info, dt);
+  net.storages.forEach((st, i) => (oil[i] = grades[i] >= 0 ? (st.stored ?? 0) : 0));
+  allocate(net, [...terms, ...refs], oil, grades, sc, cap, info, dt);
   let sold = 0;
-  let revenue = 0;
+  let revenue = productRevenue;
   for (const c of terms) {
     for (const [st, v] of c.deliveries) {
       // Остаток меньше погрешности забирается целиком: хранилище пустеет и снова принимает любой сорт.
@@ -534,10 +605,43 @@ export function stepLogistics(s: GameState, dt: number): { produced: number; sol
       revenue += amount * gradePrice(s, st.grade ?? 0);
     }
     const reachable = net.reach.get(c.b.id) ?? [];
-    const oilLeft = reachable.some((r) => oil[r.si] > 1e-6);
+    const oilLeft = reachable.some((r) => oil[r.si] > 1e-6 && ((c.mask >> grades[r.si]) & 1) === 1);
     const heldBack = reachable.some((r) => (r.storage.stored ?? 0) > 1e-6 && !sellable[r.storage.grade ?? 0]);
     c.b.status =
       c.need <= 1e-6 ? 'ok' : c.piped && oilLeft ? 'throttled' : c.moved <= 1e-9 ? (heldBack ? 'waiting_price' : 'no_oil') : 'ok';
+    record(c);
+  }
+  // НПЗ: забранное сразу переработано; мазут — остаток, поэтому сумма продуктов ровно равна сырью (2.2 плана).
+  let refined = 0;
+  let refinedValue = 0;
+  const productsMade: [number, number, number] = [0, 0, 0];
+  const refinedByGrade: [number, number] = [0, 0];
+  for (const c of refs) {
+    const b = c.b;
+    let got = 0;
+    for (const [st, v] of c.deliveries) {
+      const have = st.stored ?? 0;
+      const amount = have - v < 1e-9 ? have : v;
+      st.stored = have - amount;
+      const g = (st.grade ?? 0) as Grade;
+      const y = REFINERY.yields[g];
+      const gas = amount * y[0];
+      const dsl = amount * y[1];
+      const maz = amount - gas - dsl;
+      b.products![0] += gas;
+      b.products![1] += dsl;
+      b.products![2] += maz;
+      productsMade[0] += gas;
+      productsMade[1] += dsl;
+      productsMade[2] += maz;
+      refinedByGrade[g] += amount;
+      refinedValue += amount * gradePrice(s, g);
+      got += amount;
+    }
+    refined += got;
+    const reachable = net.reach.get(b.id) ?? [];
+    const oilLeft = reachable.some((r) => oil[r.si] > 1e-6 && ((c.mask >> grades[r.si]) & 1) === 1);
+    b.status = c.need <= 1e-6 ? 'ok' : c.piped && oilLeft ? 'throttled' : got <= REFINERY.eps ? 'no_feed' : 'ok';
     record(c);
   }
   net.storages.forEach((st, i) => (grades[i] = (st.stored ?? 0) > 1e-9 ? (st.grade ?? 0) : -1));
@@ -592,5 +696,41 @@ export function stepLogistics(s: GameState, dt: number): { produced: number; sol
     record(c);
   }
   syncOil(s);
-  return { produced, sold, revenue };
+  return { produced, sold, revenue, refined, refinedByGrade, refinedValue, productsMade, productsSold, productRevenue };
+}
+
+/**
+ * Допустимый объём переработки НПЗ за шаг (2.1 плана). Маска M = фильтр ∩ (маржа > 0, если marginOnly);
+ * need = min(мощность·dt, min по продуктам free_i / ŷ_i), где ŷ_i — худший выход продукта среди сортов M.
+ * Гарантия: при любой смеси сортов из M суммарно не больше need продукты помещаются на склады.
+ */
+export function refineryPlan(
+  s: GameState,
+  b: Building,
+  dt: number,
+  present = 3,
+): { need: number; mask: number; filterMask: number; limitedBy: number } {
+  const feed = b.feed ?? 'any';
+  const filterMask = feed === 'light' ? 1 : feed === 'heavy' ? 2 : 3;
+  let mask = filterMask;
+  if (b.marginOnly !== false) for (const g of [0, 1] as const) if (refineryMargin(s, g) <= 0) mask &= ~(1 << g);
+  let need = levelSpec(b).value * dt;
+  let limitedBy = -1;
+  if (mask === 0) return { need: 0, mask, filterMask, limitedBy };
+  const capP = refineryProductCap(b);
+  // Худший выход — по сортам, которые НПЗ может реально получить в этом шаге: допустимым и имеющимся в достижимых
+  // хранилищах на начало забора (в фазе забора хранилища только отдают нефть, новый сорт появиться не может).
+  const possible = mask & present;
+  for (let i = 0; i < 3; i++) {
+    let worst = 0;
+    for (const g of [0, 1] as const) if ((possible >> g) & 1) worst = Math.max(worst, REFINERY.yields[g][i]);
+    if (worst <= 0) continue;
+    const freeI = Math.max(0, capP - (b.products?.[i] ?? 0) - REFINERY.epsCap);
+    if (freeI / worst < need) {
+      need = freeI / worst;
+      limitedBy = i;
+    }
+  }
+  if (need <= REFINERY.eps) need = 0;
+  return { need, mask, filterMask, limitedBy };
 }

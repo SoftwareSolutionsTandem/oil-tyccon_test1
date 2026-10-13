@@ -16,6 +16,9 @@ const STATUS_TEXT: Record<Building['status'], [string, 'ok' | 'warn' | 'bad']> =
   no_route: ['Не подключено к хранилищу', 'bad'],
   throttled: ['Ограничено пропускной способностью трубы', 'warn'],
   wrong_grade: ['Простой: нет хранилища для этого сорта', 'bad'],
+  no_feed: ['Нет сырья подходящего сорта', 'warn'],
+  waiting_margin: ['Переработка сейчас невыгодна', 'warn'],
+  product_full: ['Склад нефтепродукта заполнен', 'bad'],
 };
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', html = ''): HTMLElementTagNameMap[K] {

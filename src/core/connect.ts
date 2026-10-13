@@ -44,9 +44,9 @@ const SIDES = [
   [0, -1],
 ] as const;
 
-/** Поток здания, к которому стремится подключение: добыча качалки или отгрузка терминала. */
+/** Поток здания, к которому стремится подключение: добыча качалки, отгрузка терминала или переработка НПЗ. */
 function wantOf(s: GameState, b: Building): number {
-  return b.type === 'pumpjack' ? pumpRate(s, b) : b.type === 'terminal' ? levelSpec(b).value : 0;
+  return b.type === 'pumpjack' ? pumpRate(s, b) : b.type === 'terminal' || b.type === 'refinery' ? levelSpec(b).value : 0;
 }
 
 /** Пробный поток на копии состояния (меряем трубы, а не заполненность склада). Само состояние не меняется. */
@@ -172,7 +172,7 @@ const cache = new WeakMap<GameState, Map<string, ConnectOption[]>>();
  */
 export function connectOptions(s: GameState, id: number, pipe: 1 | 2 = 1): ConnectOption[] {
   const b = getBuilding(s, id);
-  if (!b || (b.type !== 'pumpjack' && b.type !== 'terminal')) return [];
+  if (!b || (b.type !== 'pumpjack' && b.type !== 'terminal' && b.type !== 'refinery')) return [];
   const key = `${getNetwork(s).sig}:${id}:${pipe}`;
   let byState = cache.get(s);
   if (!byState) cache.set(s, (byState = new Map()));

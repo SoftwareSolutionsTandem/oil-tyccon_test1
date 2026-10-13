@@ -6,6 +6,8 @@ import {
   HEAVY_SPREAD,
   HQ_STORAGE,
   MANUAL_SELL_FACTOR,
+  PRODUCTS,
+  REFINERY,
   MOTHBALL_UPKEEP,
   PARCEL_BASE_PRICE,
   PARCEL_PRICE_GROWTH,
@@ -130,6 +132,50 @@ export function manualGradePrice(s: GameState, g: Grade): number {
   return gradePrice(s, g) * MANUAL_SELL_FACTOR;
 }
 
+// ——— Нефтепродукты и НПЗ ———
+
+/** Цикл цены продукта i в момент t: синус с фазой от seed, без ГСЧ и без состояния. */
+export function productCycle(s: GameState, i: number, t = s.time): number {
+  const ph = (((s.seed >>> 0) * (i + 3) * 2654435761) >>> 0) / 4294967296;
+  const v = 1 + PRODUCTS.amplitude * Math.sin((2 * Math.PI * t) / PRODUCTS.periods[i] + ph * 2 * Math.PI);
+  return Math.min(PRODUCTS.max, Math.max(PRODUCTS.min, v));
+}
+
+/** Цена нефтепродукта i, $/барр.: база · (1 + alpha·(P/50 − 1)) · цикл. Частично следует за ценой нефти. */
+export function productPrice(s: GameState, i: number, t = s.time, crude = s.market.price, cycle = true): number {
+  const follow = 1 + PRODUCTS.alpha * (crude / 50 - 1);
+  return PRODUCTS.base[i] * follow * (cycle ? productCycle(s, i, t) : 1);
+}
+
+/** Стоимость корзины продуктов из одного барреля сорта g по текущим ценам (cycle = false — по базовым циклам). */
+export function basketValue(s: GameState, g: Grade, cycle = true): number {
+  const y = REFINERY.yields[g];
+  return y[0] * productPrice(s, 0, s.time, s.market.price, cycle) + y[1] * productPrice(s, 1, s.time, s.market.price, cycle) + y[2] * productPrice(s, 2, s.time, s.market.price, cycle);
+}
+
+/**
+ * Маржа переработки барреля сорта g против его прямой продажи через терминал: предельная выгода,
+ * без содержания НПЗ (оно платится и при простое) — основа флажка «только при выгоде».
+ */
+export function refineryMargin(s: GameState, g: Grade, cycle = true): number {
+  return basketValue(s, g, cycle) - gradePrice(s, g);
+}
+
+/** Ёмкость склада каждого продукта и мощность отгрузки НПЗ его уровня. */
+export function refineryProductCap(b: Building): number {
+  return REFINERY.productCap[b.level - 1] ?? REFINERY.productCap[0];
+}
+export function refineryShip(b: Building): number {
+  return REFINERY.ship[b.level - 1] ?? REFINERY.ship[0];
+}
+
+/** Суммарная мощность переработки работающих НПЗ, барр./с. */
+export function refineryCapacity(s: GameState): number {
+  let total = 0;
+  for (const b of s.buildings) if (b.type === 'refinery' && b.enabled) total += levelSpec(b).value;
+  return total;
+}
+
 /** Нефть по сортам во всех хранилищах. */
 export function oilByGrade(s: GameState): [number, number] {
   const out: [number, number] = [0, 0];
@@ -180,7 +226,7 @@ export function parcelPrice(s: GameState): number {
 }
 
 export function emptyBucket(): StatBucket {
-  return { produced: 0, sold: 0, revenue: 0, expenses: 0 };
+  return { produced: 0, sold: 0, revenue: 0, expenses: 0, refined: 0, productRevenue: 0 };
 }
 
 export function recordStat(s: GameState, key: keyof StatBucket, value: number): void {
@@ -205,6 +251,9 @@ export function lastMinute(s: GameState): StatBucket {
     sum.sold += b.sold;
     sum.revenue += b.revenue;
     sum.expenses += b.expenses;
+    // ?? 0 — у секунд из сохранений до v5 этих полей нет.
+    sum.refined += b.refined ?? 0;
+    sum.productRevenue += b.productRevenue ?? 0;
   }
   return sum;
 }
