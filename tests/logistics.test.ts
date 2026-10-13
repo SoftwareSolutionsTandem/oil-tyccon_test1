@@ -23,6 +23,7 @@ import {
   sellManual,
   serialize,
   setSellThreshold,
+  SAVE_VERSION,
   START_CASH,
   syncOil,
   tick,
@@ -444,11 +445,15 @@ describe('сохранения', () => {
     const old = JSON.parse(serialize(s));
     old.version = 1;
     delete old.map.pipes;
-    for (const b of old.buildings) delete b.stored;
+    delete old.map.grade; // в v1 не было ни труб, ни сортов
+    for (const b of old.buildings) {
+      delete b.stored;
+      delete b.grade;
+    }
     old.oil = 123.5;
     const cashBefore = old.cash;
     const migrated = deserialize(JSON.stringify(old))!;
-    expect(migrated.version).toBe(2);
+    expect(migrated.version).toBe(SAVE_VERSION);
     expect(migrated.cash).toBe(cashBefore);
     expect(migrated.oil).toBeCloseTo(123.5, 9);
     expect(migrated.buildings.length).toBe(old.buildings.length);

@@ -1,6 +1,6 @@
 import { DEPLETION_MIN_FACTOR, PIPES } from './config';
-import { drainageTiles, levelSpec } from './economy';
-import type { Building, GameState } from './types';
+import { drainageTiles, gradePrice, levelSpec, nominalRate, pumpGrade } from './economy';
+import type { Building, GameState, Grade } from './types';
 
 /**
  * Логистика: сеть трубопроводов и хранилищ.
@@ -318,9 +318,9 @@ export function lastFlow(s: GameState): FlowInfo | undefined {
 }
 
 /** То же, что pumpRate, но по уже посчитанной зоне (без повторного обхода зданий). */
-function rateOf(b: Building, reserve: number, initial: number): number {
+function rateOf(s: GameState, b: Building, reserve: number, initial: number): number {
   if (initial <= 0 || reserve <= 0) return 0;
-  return levelSpec(b).value * (DEPLETION_MIN_FACTOR + (1 - DEPLETION_MIN_FACTOR) * (reserve / initial));
+  return nominalRate(s, b) * (DEPLETION_MIN_FACTOR + (1 - DEPLETION_MIN_FACTOR) * (reserve / initial));
 }
 
 const free = (b: Building) => Math.max(0, levelSpec(b).value - (b.stored ?? 0));
@@ -344,6 +344,8 @@ interface Client {
   firstStorage: number;
   /** Сколько перекачано в каждое хранилище (из каждого — для терминала). */
   deliveries: Map<Building, number>;
+  /** Сорт нефти качалки; −1 — терминал (забирает любой сорт). */
+  grade: number;
 }
 
 /** Рабочие массивы расчёта потока за тик (переиспользуются между тиками). */
@@ -361,10 +363,22 @@ interface Scratch {
  * пути и долей хранилища; все применяются одновременно. После насыщения труб следующий раунд ищет маршруты
  * в обход них — так работают параллельные ветки и другие входы в хранилища. Результат не зависит от порядка клиентов.
  */
-function allocate(net: Network, clients: Client[], room: Float64Array, sc: Scratch, cap: (tile: number) => number, info: FlowInfo, dt: number): void {
+function allocate(
+  net: Network,
+  clients: Client[],
+  room: Float64Array,
+  grades: Int8Array,
+  sc: Scratch,
+  cap: (tile: number) => number,
+  info: FlowInfo,
+  dt: number,
+): void {
   const { spare, touched, load } = sc;
   const left = (t: number) => (spare[t] === spare[t] ? spare[t] : cap(t) * dt);
+  // Хранилище принимает нефть своего сорта; пустое (−1) — любого. Терминал (сорт −1) берёт из любого.
+  const fits = (c: Client, si: number) => c.grade < 0 || grades[si] < 0 || grades[si] === c.grade;
   const asked = new Float64Array(room.length);
+  const askedBy = [new Float64Array(room.length), new Float64Array(room.length)];
   for (let round = 0; round < ROUNDS; round++) {
     const saturated: number[] = [];
     for (const t of touched) if (spare[t] <= 1e-9) saturated.push(t);
@@ -377,7 +391,7 @@ function allocate(net: Network, clients: Client[], room: Float64Array, sc: Scrat
       // Ближайшее хранилище, где есть место (нефть). Маршруты этого раунда уже обходят насыщенные трубы.
       let to: Client['list'][number] | undefined;
       for (const r of c.list)
-        if (room[r.si] > 1e-9) {
+        if (room[r.si] > 1e-9 && fits(c, r.si)) {
           to = r;
           break;
         }
@@ -409,6 +423,16 @@ function allocate(net: Network, clients: Client[], room: Float64Array, sc: Scrat
       }
     }
     for (const a of active) for (const t of a.path) load[t] = 0;
+    // Пустое хранилище, в которое в одном раунде просятся оба сорта, принимает сорт с большим потоком
+    // (при равенстве — лёгкую); другой сорт ищет место в следующем раунде.
+    askedBy[0].fill(0);
+    askedBy[1].fill(0);
+    for (const a of active) if (a.c.grade >= 0 && grades[a.si] < 0) askedBy[a.c.grade][a.si] += a.amount;
+    for (const a of active) {
+      if (a.c.grade < 0 || grades[a.si] >= 0) continue;
+      const winner = askedBy[1][a.si] > askedBy[0][a.si] ? 1 : 0;
+      if (a.c.grade !== winner && askedBy[winner][a.si] > 0) a.amount = 0;
+    }
     // Доля хранилища: если просят больше, чем есть места (нефти), — пропорционально.
     asked.fill(0);
     for (const a of active) asked[a.si] += a.amount;
@@ -418,6 +442,7 @@ function allocate(net: Network, clients: Client[], room: Float64Array, sc: Scrat
       if (a.amount <= 0) continue;
       movedAny = true;
       room[a.si] = Math.max(0, room[a.si] - a.amount);
+      if (a.c.grade >= 0) grades[a.si] = a.c.grade;
       a.c.need -= a.amount;
       a.c.moved += a.amount;
       const st = net.storages[a.si];
@@ -439,7 +464,7 @@ const scratch = new WeakMap<GameState, Scratch>();
  * в хранилища. Пропускная способность трубы за тик общая: сначала её занимает отгрузка, остаток — добыча.
  * Добытое ровно равно убыли запасов месторождений и ровно попадает в хранилища; проданное ровно уходит из них.
  */
-export function stepLogistics(s: GameState, dt: number, price: number, priceOk: boolean): { produced: number; sold: number; revenue: number } {
+export function stepLogistics(s: GameState, dt: number): { produced: number; sold: number; revenue: number } {
   const net = getNetwork(s);
   const total = s.map.size * s.map.size;
   let info = flows.get(s);
@@ -469,6 +494,7 @@ export function stepLogistics(s: GameState, dt: number, price: number, priceOk: 
     firstPath: null,
     firstStorage: -1,
     deliveries: new Map(),
+    grade: -1,
   });
   const record = (c: Client) =>
     info!.clients.set(c.b.id, {
@@ -479,26 +505,42 @@ export function stepLogistics(s: GameState, dt: number, price: number, priceOk: 
       storage: c.firstStorage,
     });
 
-  // 1. Отгрузка через терминалы.
+  // Сорт хранилища: −1 — пусто (примет любой).
+  const grades = new Int8Array(net.storages.length);
+  net.storages.forEach((st, i) => (grades[i] = (st.stored ?? 0) > 1e-9 ? (st.grade ?? 0) : -1));
+
+  // 1. Отгрузка через терминалы. Порог цены проверяется для каждого сорта отдельно.
+  const sellable = [gradePrice(s, 0) >= s.sellThreshold, gradePrice(s, 1) >= s.sellThreshold];
   const terms: Client[] = [];
   for (const b of s.buildings) {
     if (b.type !== 'terminal') continue;
     if (!b.enabled) b.status = 'off';
     else if (!net.reach.has(b.id)) b.status = 'no_route';
-    else if (!priceOk) b.status = 'waiting_price';
+    else if (!sellable[0] && !sellable[1]) b.status = 'waiting_price';
     else terms.push(client(b, levelSpec(b).value));
   }
   const oil = new Float64Array(net.storages.length);
-  net.storages.forEach((st, i) => (oil[i] = st.stored ?? 0));
-  allocate(net, terms, oil, sc, cap, info, dt);
+  net.storages.forEach((st, i) => (oil[i] = grades[i] >= 0 && sellable[grades[i]] ? (st.stored ?? 0) : 0));
+  allocate(net, terms, oil, grades, sc, cap, info, dt);
   let sold = 0;
+  let revenue = 0;
   for (const c of terms) {
-    sold += c.moved;
-    const oilLeft = (net.reach.get(c.b.id) ?? []).some((r) => oil[r.si] > 1e-6);
-    c.b.status = c.need <= 1e-6 ? 'ok' : c.piped && oilLeft ? 'throttled' : c.moved <= 1e-9 ? 'no_oil' : 'ok';
+    for (const [st, v] of c.deliveries) {
+      // Остаток меньше погрешности забирается целиком: хранилище пустеет и снова принимает любой сорт.
+      const have = st.stored ?? 0;
+      const amount = have - v < 1e-9 ? have : v;
+      st.stored = have - amount;
+      sold += amount;
+      revenue += amount * gradePrice(s, st.grade ?? 0);
+    }
+    const reachable = net.reach.get(c.b.id) ?? [];
+    const oilLeft = reachable.some((r) => oil[r.si] > 1e-6);
+    const heldBack = reachable.some((r) => (r.storage.stored ?? 0) > 1e-6 && !sellable[r.storage.grade ?? 0]);
+    c.b.status =
+      c.need <= 1e-6 ? 'ok' : c.piped && oilLeft ? 'throttled' : c.moved <= 1e-9 ? (heldBack ? 'waiting_price' : 'no_oil') : 'ok';
     record(c);
   }
-  for (const c of terms) for (const [st, v] of c.deliveries) st.stored = Math.max(0, (st.stored ?? 0) - v);
+  net.storages.forEach((st, i) => (grades[i] = (st.stored ?? 0) > 1e-9 ? (st.grade ?? 0) : -1));
 
   // 2. Добыча: качалки качают в хранилища со свободным местом.
   const pumps: Array<Client & { tiles: number[]; pool: number }> = [];
@@ -514,11 +556,11 @@ export function stepLogistics(s: GameState, dt: number, price: number, priceOk: 
     if (pool <= 0) b.status = 'depleted';
     else if (!b.enabled) b.status = 'off';
     else if (!net.reach.has(b.id)) b.status = 'no_route';
-    else pumps.push({ ...client(b, Math.min(pool / dt, rateOf(b, pool, initial))), tiles, pool });
+    else pumps.push({ ...client(b, Math.min(pool / dt, rateOf(s, b, pool, initial))), tiles, pool, grade: pumpGrade(s, b) });
   }
   const room = new Float64Array(net.storages.length);
   net.storages.forEach((st, i) => (room[i] = free(st)));
-  allocate(net, pumps, room, sc, cap, info, dt);
+  allocate(net, pumps, room, grades, sc, cap, info, dt);
   let produced = 0;
   for (const c of pumps) {
     // Извлечение из зоны дренирования пропорционально запасам клеток; ровно столько, сколько принято хранилищами.
@@ -534,14 +576,21 @@ export function stepLogistics(s: GameState, dt: number, price: number, priceOk: 
     }
     // Зачисляется ровно добытое (got может отличаться от moved на погрешность округления).
     const k = c.moved > 0 ? got / c.moved : 0;
-    for (const [st, v] of c.deliveries) st.stored = (st.stored ?? 0) + v * k;
+    for (const [st, v] of c.deliveries) {
+      st.stored = (st.stored ?? 0) + v * k;
+      st.grade = c.grade as Grade;
+    }
     c.moved = got;
     produced += got;
     // Недобор из-за трубы — только если в достижимых хранилищах осталось место; иначе причина — заполненный склад.
-    const roomLeft = (net.reach.get(c.b.id) ?? []).some((r) => room[r.si] > 1e-6);
-    c.b.status = c.need <= 1e-6 * Math.max(1, c.want) ? 'ok' : c.piped && roomLeft ? 'throttled' : 'full';
+    const reachable = net.reach.get(c.b.id) ?? [];
+    const roomLeft = reachable.some((r) => room[r.si] > 1e-6 && (grades[r.si] < 0 || grades[r.si] === c.grade));
+    // Место есть, но только в хранилищах с нефтью другого сорта: нужен свой резервуар.
+    const otherGrade = !roomLeft && reachable.some((r) => room[r.si] > 1e-6);
+    c.b.status =
+      c.need <= 1e-6 * Math.max(1, c.want) ? 'ok' : c.piped && roomLeft ? 'throttled' : otherGrade && c.moved <= c.want * dt * 0.5 ? 'wrong_grade' : 'full';
     record(c);
   }
   syncOil(s);
-  return { produced, sold, revenue: sold * price };
+  return { produced, sold, revenue };
 }

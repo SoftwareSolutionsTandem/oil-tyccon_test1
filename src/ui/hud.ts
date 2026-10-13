@@ -15,6 +15,7 @@ const STATUS_TEXT: Record<Building['status'], [string, 'ok' | 'warn' | 'bad']> =
   no_oil: ['Нет нефти для отгрузки', 'warn'],
   no_route: ['Не подключено к хранилищу', 'bad'],
   throttled: ['Ограничено пропускной способностью трубы', 'warn'],
+  wrong_grade: ['Простой: нет хранилища для этого сорта', 'bad'],
 };
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', html = ''): HTMLElementTagNameMap[K] {
@@ -72,8 +73,8 @@ export class Hud {
     bar.innerHTML = `
       <div class="brand">OIL TYCOON</div>
       <div class="stat"><span class="label">Деньги</span><span class="value" data-ref="cash"></span></div>
-      <div class="stat" style="min-width:150px"><span class="label">Нефть на складе</span><span class="value" data-ref="oil"></span><div class="bar" data-ref="oilbar"><div></div></div></div>
-      <div class="stat"><span class="label">Цена нефти</span><div class="price-row"><span class="value" data-ref="price"></span><span class="trend" data-ref="trend"></span><canvas class="spark" width="110" height="28" style="width:110px;height:28px"></canvas></div></div>
+      <div class="stat" style="min-width:150px"><span class="label">Нефть на складе</span><span class="value" data-ref="oil"></span><span class="sub" data-ref="oilgrades"></span><div class="bar" data-ref="oilbar"><div></div></div></div>
+      <div class="stat"><span class="label">Цена нефти</span><div class="price-row"><span class="value" data-ref="price"></span><span class="trend" data-ref="trend"></span><canvas class="spark" width="110" height="28" style="width:110px;height:28px"></canvas></div><span class="sub" data-ref="heavyprice"></span></div>
       <div class="stat"><span class="label">Прибыль за минуту</span><span class="value" data-ref="profit"></span></div>
       <button class="primary" data-ref="sell" title="Продать всю нефть перекупщику со скидкой 20% (S)"></button>
       <div class="spacer"></div>
@@ -152,6 +153,8 @@ export class Hud {
     this.wasNegative = s.cash < 0;
 
     this.refs.oil.textContent = `${num(s.oil)} / ${num(cap)}`;
+    const [light, heavy] = core.oilByGrade(s);
+    this.refs.oilgrades.textContent = heavy > 0.5 ? `лёгк. ${num(light)} · тяж. ${num(heavy)}` : '';
     const fill = Math.min(1, s.oil / cap);
     (this.refs.oilbar.firstElementChild as HTMLElement).style.width = `${fill * 100}%`;
     this.refs.oilbar.classList.toggle('full', fill > 0.97);
@@ -160,13 +163,15 @@ export class Hud {
     const prev = hist[Math.max(0, hist.length - 15)] ?? s.market.price;
     const diff = s.market.price - prev;
     this.refs.price.textContent = price(s.market.price);
+    this.refs.heavyprice.textContent = `тяж. ${price(core.gradePrice(s, 1))} (−${Math.round(core.heavySpread(s) * 100)}%)`;
+    this.refs.heavyprice.title = 'Тяжёлая нефть продаётся со скидкой к цене лёгкой. Скидка меняется по своему циклу: иногда разница почти исчезает.';
     this.refs.trend.textContent = diff > 0.5 ? '▲' : diff < -0.5 ? '▼' : '•';
     this.refs.trend.style.color = diff > 0.5 ? 'var(--good)' : diff < -0.5 ? 'var(--bad)' : 'var(--muted)';
     this.drawSparkline();
 
     this.refs.profit.textContent = money(profit);
     this.refs.profit.className = `value ${profit < 0 ? 'neg' : profit > 0 ? 'pos' : ''}`;
-    this.refs.sell.textContent = `Продать ${num(s.oil)} барр. · ${money(s.oil * core.manualSellPrice(s))}`;
+    this.refs.sell.textContent = `Продать ${num(s.oil)} барр. · ${money(core.manualSellValue(s))}`;
     (this.refs.sell as HTMLButtonElement).disabled = s.oil < 1;
     for (const [v, b] of this.speedButtons) b.classList.toggle('active', this.game.speed === v);
     const hour = this.handlers.hour();
@@ -326,6 +331,8 @@ export class Hud {
         <div class="small" style="margin-bottom:8px">Покупка расширяет территорию компании. Тёмные пятна — разведанные месторождения.</div>
         ${kv('Клеток с нефтью', num(survey.tiles))}
         ${kv('Разведанные запасы', bbl(survey.reserves))}
+        ${survey.reserves > 0 ? kv('Из них лёгкой / тяжёлой', `${num(survey.light)} / ${num(survey.heavy)} барр.`) : ''}
+        ${survey.heavy > 0 ? `<div class="small" style="margin-top:4px">Тяжёлая нефть дешевле (сейчас −${Math.round(core.heavySpread(s) * 100)}%), её месторождения крупнее; станки 1-го уровня качают её на ${Math.round((1 - core.GRADES[1].level1Rate) * 100)}% медленнее. Сорта не смешиваются: для тяжёлой нужен свой резервуар.</div>` : ''}
         ${kv('Цена', money(priceValue))}
         ${!check.ok ? `<div class="small" style="color:var(--bad);margin-top:6px">${check.reason}</div>` : ''}`;
       if (key !== this.selectionKey) {
@@ -338,6 +345,12 @@ export class Hud {
     }
     this.selectionKey = key;
     this.selectionPanel.style.display = key ? '' : 'none';
+  }
+
+  /** Сорт нефти в хранилище (хранилище не смешивает сорта). */
+  private storageGrade(b: Building): string {
+    if ((b.stored ?? 0) <= 1e-6) return kv('Сорт', 'пусто — примет любой');
+    return kv('Сорт', core.GRADES[b.grade ?? 0].name);
   }
 
   /** Сеть, в которую входит клетка: хранилища, запас, подключённые здания. */
@@ -382,6 +395,7 @@ export class Hud {
         <div class="small">${b.type === 'pumpjack' ? 'Нефть не добывается' : 'Терминал не может забирать нефть'}, пока здание не соединено трубой с конторой или резервуаром. ${plan.tiles.length ? `Кратчайшая труба: ${plan.tiles.length} кл. за ${money(plan.cost)}.` : plan.reason ?? ''}</div>`;
     }
     if (!f) return '';
+    if (b.status === 'wrong_grade') return `<div class="sep"></div>${kv('Нефть идёт в', '<span style="color:var(--bad)">некуда: хранилища заняты другим сортом</span>')}`;
     const target = core.getBuilding(s, f.storage);
     const where = target ? `${core.buildingName(target.type)}${f.path.length ? `, ${f.path.length} кл. трубы` : ', вплотную'}` : '—';
     let out = `<div class="sep"></div>${kv(b.type === 'pumpjack' ? 'Нефть идёт в' : 'Забирает из', where)}`;
@@ -402,7 +416,7 @@ export class Hud {
     const head = `<div class="sel-title">${name}${b.type !== 'hq' ? ` · ур. ${b.level}` : ''}</div><span class="status ${statusCls}">${statusText}</span>`;
     const upkeep = kv('Содержание', `${money(core.buildingUpkeep(b) * 60)}/мин`);
     if (b.type === 'hq') {
-      return `${head}${kv('Склад при конторе', `${num(b.stored ?? 0)} / ${num(core.HQ_STORAGE)} барр.`)}${this.networkSummary(core.componentOf(s, b))}${kv('Продажа перекупщику', `${price(core.manualSellPrice(s))} за барр.`)}<div class="small">Здесь начинается ваша компания. Перекупщик забирает нефть из всех хранилищ сразу (своими машинами, трубы не нужны), но платит на 20% меньше рынка.</div>`;
+      return `${head}${kv('Склад при конторе', `${num(b.stored ?? 0)} / ${num(core.HQ_STORAGE)} барр.`)}${this.storageGrade(b)}${this.networkSummary(core.componentOf(s, b))}${kv('Перекупщик платит', `лёгк. ${price(core.manualSellPrice(s, 0))} · тяж. ${price(core.manualSellPrice(s, 1))}`)}<div class="small">Здесь начинается ваша компания. Перекупщик забирает нефть из всех хранилищ сразу (своими машинами, трубы не нужны), но платит на 20% меньше рынка.</div>`;
     }
     const spec = core.levelSpec(b);
     const next = core.upgradeCost(b) !== null ? core.BUILDINGS[b.type].levels[b.level] : null;
@@ -411,19 +425,23 @@ export class Hud {
       const pool = core.drainagePool(s, b);
       const zone = core.drainageTiles(s, b).length;
       const timeLeft = core.timeToDeplete(s, b);
+      const g = core.pumpGrade(s, b);
+      const slow = g === 1 && b.level === 1 ? ` <span class="small">(тяжёлую станок 1-го ур. тянет на ${Math.round((1 - core.GRADES[1].level1Rate) * 100)}% медленнее)</span>` : '';
       return `${head}
-        ${kv('Добыча', rate(r * 60))}
-        ${kv('Выручка при текущей цене', `${money(r * 60 * s.market.price)}/мин`)}
+        ${kv('Сорт нефти', `${core.GRADES[g].name}${g === 1 ? ` · ${price(core.gradePrice(s, 1))} (−${Math.round(core.heavySpread(s) * 100)}%)` : ''}`)}
+        ${kv('Добыча', rate(r * 60) + slow)}
+        ${kv('Выручка при текущей цене', `${money(r * 60 * core.gradePrice(s, g))}/мин`)}
+        ${b.status === 'wrong_grade' ? `<div class="small" style="color:var(--bad)">Хранилища сети заняты нефтью другого сорта: резервуар хранит только один сорт. Поставьте для этой качалки свой резервуар или продайте нефть — пустой резервуар примет любой сорт.</div>` : ''}
         ${upkeep}
         ${kv(`Запасы зоны (${zone} кл.)`, `${num(pool.reserve)} / ${num(pool.initial)}`)}
         ${kv('Хватит при работе без простоев', r > 0 ? duration(timeLeft) : '—')}
         ${this.connectionInfo(b)}
-        ${next ? `<div class="sep"></div>${kv('След. уровень: добыча', rate(next.value * 60 * (r / spec.value || 1)))}${kv('След. уровень: содержание', `${money(next.upkeep * 60)}/мин`)}` : ''}
+        ${next ? `<div class="sep"></div>${kv('След. уровень: добыча', rate(next.value * 60 * (r / core.nominalRate(s, b) || 1)))}${kv('След. уровень: содержание', `${money(next.upkeep * 60)}/мин`)}` : ''}
         <div class="small" style="margin-top:6px">Скважина тянет нефть из своей клетки и соседних по сторонам клеток месторождения (зона подсвечена). Добыча снижается по мере истощения (до ${Math.round(core.DEPLETION_MIN_FACTOR * 100)}% от номинала).</div>`;
     }
     if (b.type === 'tank') {
-      return `${head}${kv('В резервуаре', `${num(b.stored ?? 0)} / ${num(spec.value)} барр.`)}${upkeep}<div class="sep"></div>${this.networkSummary(core.componentOf(s, b))}${kv('Вся нефть компании', `${num(s.oil)} / ${num(core.storageCapacity(s))}`)}${next ? `<div class="sep"></div>${kv('След. уровень: ёмкость', bbl(next.value))}` : ''}
-        <div class="small" style="margin-top:6px">Нефть хранится по месту: качалки сети заполняют сначала ближайшее хранилище. Сами резервуары между собой не перекачивают, но терминал забирает из ближайшего, где есть нефть.</div>`;
+      return `${head}${kv('В резервуаре', `${num(b.stored ?? 0)} / ${num(spec.value)} барр.`)}${this.storageGrade(b)}${upkeep}<div class="sep"></div>${this.networkSummary(core.componentOf(s, b))}${kv('Вся нефть компании', `${num(s.oil)} / ${num(core.storageCapacity(s))}`)}${next ? `<div class="sep"></div>${kv('След. уровень: ёмкость', bbl(next.value))}` : ''}
+        <div class="small" style="margin-top:6px">Нефть хранится по месту: качалки сети заполняют сначала ближайшее хранилище. Сами резервуары между собой не перекачивают, но терминал забирает из ближайшего, где есть нефть. Резервуар хранит один сорт: пока в нём есть нефть, другой сорт сюда не пойдёт.</div>`;
     }
     return `${head}
       ${kv('Отгрузка', rate(spec.value * 60))}
@@ -432,7 +450,8 @@ export class Hud {
       ${next ? `<div class="sep"></div>${kv('След. уровень: отгрузка', rate(next.value * 60))}` : ''}
       <div class="sep"></div>
       ${kv('Мин. цена продажи', s.sellThreshold > 0 ? price(s.sellThreshold) : 'любая')}
-      <div class="small">Порог общий для всех терминалов. Если цена ниже — нефть копится в резервуарах.</div>`;
+      ${kv('Сейчас', `лёгк. ${price(core.gradePrice(s, 0))} · тяж. ${price(core.gradePrice(s, 1))}`)}
+      <div class="small">Порог общий для всех терминалов и проверяется для каждого сорта: если цена сорта ниже — эта нефть копится в резервуарах, а другой сорт продаётся.</div>`;
   }
 
   private buildingActions(b: Building): HTMLElement[] {
@@ -564,7 +583,8 @@ export class Hud {
           const probe = { id: -1, type: 'pumpjack' as const, x: g.hover.x, y: g.hover.y, level: 1, enabled: true, invested: 0, status: 'ok' as const };
           const n = core.pumpNeighbors(s, g.hover.x, g.hover.y);
           const row = n.alongX || n.alongY ? ' · встанет в ряд бок о бок' : '';
-          reason = ` · зона: ${core.drainageTiles(s, probe).length} кл., ${bbl(core.drainagePool(s, probe).reserve)}${row}`;
+          const grade = core.GRADES[core.pumpGrade(s, probe)].name.toLowerCase();
+          reason = ` · ${grade} нефть, зона: ${core.drainageTiles(s, probe).length} кл., ${bbl(core.drainagePool(s, probe).reserve)}${row}`;
         } else reason = r.ok ? ' · можно строить' : ` · ${r.reason}`;
       }
       text = `Строительство: ${name} (${money(core.buildCost(s, g.mode))})${reason.replace(/\.$/, "")}. ЛКМ — поставить, ПКМ или Esc — отмена`;
@@ -573,7 +593,7 @@ export class Hud {
       const b = core.buildingAt(s, g.hover.x, g.hover.y);
       if (b) text = core.buildingName(b.type);
       else if (s.map.pipes[i] > 0) text = `${core.PIPES[s.map.pipes[i] as 1 | 2].name} — щёлкните, чтобы увидеть загрузку`;
-      else if (s.map.initial[i] > 0) text = `Месторождение: ${bbl(s.map.reserve[i])}${core.isTileOwned(s, g.hover.x, g.hover.y) ? ' — постройте качалку (1)' : ''}`;
+      else if (s.map.initial[i] > 0) text = `Месторождение (${core.GRADES[(s.map.grade[i] ?? 0) as 0 | 1].name.toLowerCase()} нефть): ${bbl(s.map.reserve[i])}${core.isTileOwned(s, g.hover.x, g.hover.y) ? ' — постройте качалку (1)' : ''}`;
       else if (!core.isTileOwned(s, g.hover.x, g.hover.y)) text = 'Чужой участок — щёлкните, чтобы узнать цену';
     }
     if (this.refs.hint.textContent !== text) this.refs.hint.textContent = text;
@@ -612,6 +632,7 @@ export class Hud {
         <li><b>Трубопроводы.</b> Качалка отдаёт нефть только по трубе в контору или резервуар (или стоя вплотную к ним). Тяните трубу инструментом «Трубопровод» (4) или нажмите «Подключить» у качалки. Труба пропускает ограниченный поток — перегруженный участок замените магистралью (5).</li>
         <li><b>Хранение.</b> Нефть копится на складе. Когда он полон, качалки простаивают, но содержание платить всё равно нужно.</li>
         <li><b>Продажа.</b> Вручную — перекупщику со скидкой 20%. Наливной терминал продаёт сам и по полной цене, можно задать минимальную цену.</li>
+        <li><b>Сорта нефти.</b> Лёгкая продаётся по рыночной цене, тяжёлая — со скидкой, которая меняется (то больше, то почти исчезает); зато тяжёлые месторождения крупнее. Резервуар хранит один сорт — для тяжёлой нефти нужен свой.</li>
         <li><b>Рынок.</b> Цена колеблется. Резервуары позволяют придержать нефть до роста цены.</li>
         <li><b>Развитие.</b> Улучшайте здания, покупайте соседние участки с новыми месторождениями.</li>
       </ul>

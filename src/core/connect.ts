@@ -58,8 +58,9 @@ export function trialFlow(s: GameState, tiles: PipeTile[] = [], pipe: 1 | 2 = 1,
   // Хранилища наполовину полны: у качалок есть куда качать, у терминалов — что забирать. Так проба меряет
   // установившийся режим работающего промысла, где отгрузка и добыча делят одни и те же трубы.
   for (const b of copy.buildings) if (b.type === 'hq' || b.type === 'tank') b.stored = levelSpec(b).value / 2;
+  copy.sellThreshold = 0;
   syncOil(copy);
-  stepLogistics(copy, 1, copy.market.price, true);
+  stepLogistics(copy, 1);
   return lastFlow(copy)!;
 }
 

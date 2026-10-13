@@ -106,6 +106,30 @@ export const BUILDINGS: Record<BuildableType, BuildingSpec> = {
 
 export const HQ_NAME = 'Контора';
 
+/**
+ * Сорта нефти. Лёгкая продаётся по рыночной цене. Тяжёлая — со скидкой, которая меняется по своему циклу
+ * (иногда разница почти исчезает); зато месторождения тяжёлой нефти крупнее. Вязкую нефть хуже тянут
+ * старые станки 1-го уровня с газовым двигателем — модернизация важнее.
+ */
+export const GRADES = [
+  { name: 'Лёгкая', short: 'лёгк.', reserveFactor: 1, level1Rate: 1 },
+  { name: 'Тяжёлая', short: 'тяж.', reserveFactor: 1.6, level1Rate: 0.8 },
+] as const;
+
+/** Скидка на тяжёлую нефть (доля цены лёгкой): средняя, медленный и быстрый циклы, границы. */
+export const HEAVY_SPREAD = {
+  mean: 0.2,
+  slowAmplitude: 0.12,
+  slowPeriod: 1500,
+  fastAmplitude: 0.05,
+  fastPeriod: 370,
+  min: 0.06,
+  max: 0.42,
+};
+
+/** Доля тяжёлых месторождений по удалённости участка от стартового (старт — всегда лёгкая). */
+export const HEAVY_CHANCE = [0, 0.3, 0.5, 0.55, 0.6];
+
 export interface PipeSpec {
   name: string;
   /** Стоимость клетки, $. */

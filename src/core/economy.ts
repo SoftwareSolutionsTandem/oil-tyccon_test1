@@ -2,13 +2,16 @@ import {
   BUILDINGS,
   DEMOLISH_REFUND,
   DEPLETION_MIN_FACTOR,
+  GRADES,
+  HEAVY_SPREAD,
   HQ_STORAGE,
+  MANUAL_SELL_FACTOR,
   MOTHBALL_UPKEEP,
   PARCEL_BASE_PRICE,
   PARCEL_PRICE_GROWTH,
   STATS_WINDOW,
 } from './config';
-import type { BuildableType, Building, GameState, StatBucket } from './types';
+import type { BuildableType, Building, GameState, Grade, StatBucket } from './types';
 import { ownedParcelCount, tileIndex } from './world';
 
 export function levelSpec(b: Building) {
@@ -89,7 +92,49 @@ export function pumpRate(s: GameState, b: Building): number {
   const pool = drainagePool(s, b);
   if (pool.initial <= 0 || pool.reserve <= 0) return 0;
   const factor = DEPLETION_MIN_FACTOR + (1 - DEPLETION_MIN_FACTOR) * (pool.reserve / pool.initial);
-  return levelSpec(b).value * factor;
+  return nominalRate(s, b) * factor;
+}
+
+/** Сорт нефти, которую добывает качалка: сорт месторождения её клетки (зона дренирования одного сорта). */
+export function pumpGrade(s: GameState, b: Building): Grade {
+  return (s.map.grade[tileIndex(s, b.x, b.y)] ?? 0) as Grade;
+}
+
+/** Номинальная добыча качалки с учётом сорта: старые станки 1-го уровня медленнее тянут тяжёлую нефть. */
+export function nominalRate(s: GameState, b: Building): number {
+  const v = levelSpec(b).value;
+  return b.level === 1 ? v * GRADES[pumpGrade(s, b)].level1Rate : v;
+}
+
+/**
+ * Скидка на тяжёлую нефть, доля цены лёгкой. Зависит только от времени и seed (два цикла с фазами от seed),
+ * поэтому не требует состояния и не сдвигает ГСЧ цены лёгкой нефти.
+ */
+export function heavySpread(s: GameState): number {
+  const ph = ((s.seed >>> 0) % 997) / 997;
+  const h = HEAVY_SPREAD;
+  const v =
+    h.mean +
+    h.slowAmplitude * Math.sin((2 * Math.PI * s.time) / h.slowPeriod + ph * 6.283) +
+    h.fastAmplitude * Math.sin((2 * Math.PI * s.time) / h.fastPeriod + ph * 17.3);
+  return Math.min(h.max, Math.max(h.min, v));
+}
+
+/** Рыночная цена сорта, $/барр. Лёгкая — рыночная цена, тяжёлая — со скидкой. */
+export function gradePrice(s: GameState, g: Grade): number {
+  return g === 1 ? s.market.price * (1 - heavySpread(s)) : s.market.price;
+}
+
+/** Цена перекупщика для сорта. */
+export function manualGradePrice(s: GameState, g: Grade): number {
+  return gradePrice(s, g) * MANUAL_SELL_FACTOR;
+}
+
+/** Нефть по сортам во всех хранилищах. */
+export function oilByGrade(s: GameState): [number, number] {
+  const out: [number, number] = [0, 0];
+  for (const b of s.buildings) if ((b.type === 'hq' || b.type === 'tank') && (b.stored ?? 0) > 0) out[b.grade ?? 0] += b.stored!;
+  return out;
 }
 
 /**
@@ -100,7 +145,7 @@ export function timeToDeplete(s: GameState, b: Building): number {
   const { reserve: r, initial: R } = drainagePool(s, b);
   if (R <= 0 || r <= 0) return 0;
   const m = DEPLETION_MIN_FACTOR;
-  const v = levelSpec(b).value;
+  const v = nominalRate(s, b);
   return (R / (v * (1 - m))) * Math.log(1 + ((1 - m) * r) / (m * R));
 }
 

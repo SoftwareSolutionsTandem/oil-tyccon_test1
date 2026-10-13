@@ -76,6 +76,18 @@ function nearestFreeTile(s: GameState, x: number, y: number, maxDist = Infinity)
  */
 function fixBottlenecks(s: GameState): void {
   if (!lastFlow(s)) return;
+  // Качалке другого сорта некуда качать (хранилища заняты другим сортом) — свой резервуар рядом с ней.
+  const stuck = s.buildings.find((b) => b.type === 'pumpjack' && b.status === 'wrong_grade');
+  if (stuck && s.unlocked.includes('tank') && s.cash >= buildCost(s, 'tank')) {
+    const t = nearestFreeTile(s, stuck.x, stuck.y, 6);
+    if (t && build(s, 'tank', t.x, t.y).ok) {
+      const id = s.buildings[s.buildings.length - 1].id;
+      // Отдельная сеть для резервуара другого сорта не нужна: хватает подключения качалки к нему.
+      autoConnect(s, stuck.id);
+      if (stuck.status === 'wrong_grade') autoConnect(s, id);
+    }
+    return;
+  }
   const net = getNetwork(s);
   for (const b of s.buildings) {
     if (b.type !== 'pumpjack' || (b.status !== 'throttled' && b.status !== 'full')) continue;
@@ -117,7 +129,9 @@ function decide(s: GameState): void {
   const hasTerminal = countOf(s, 'terminal') > 0;
   // Продаём вручную, когда качалки упёрлись в заполненные хранилища (так это видит игрок по статусу «склад полон»).
   // Склад почти полон, а качалки упираются в трубу к единственному свободному хранилищу — тоже повод продать.
-  const stuck = s.buildings.some((b) => b.type === 'pumpjack' && (b.status === 'full' || (b.status === 'throttled' && s.oil > cap * 0.7)));
+  const stuck = s.buildings.some((b) => b.type === 'pumpjack' && (b.status === 'full' || b.status === 'wrong_grade' || (b.status === 'throttled' && s.oil > cap * 0.7)));
+  // Касса ушла в минус (цена провалилась, а содержание идёт) — продаём запасы, как сделал бы игрок.
+  if (s.cash < 0 && s.oil > 50) sellManual(s);
   if (stuck || (s.oil > cap * 0.9 && (!hasTerminal || terminalThroughput(s) < productionCapacity(s) * 0.5))) sellManual(s);
 
   if (s.unlocked.includes('terminal') && terminalThroughput(s) < productionCapacity(s)) {
@@ -145,7 +159,9 @@ function decide(s: GameState): void {
     for (let py = 0; py < PARCELS_PER_SIDE; py++) {
       for (let px = 0; px < PARCELS_PER_SIDE; px++) {
         if (!canBuyParcel({ ...s, cash: Infinity }, px, py).ok) continue;
-        const { reserves } = parcelSurvey(s, px, py);
+        // Тяжёлая нефть дешевле — её запасы бот ценит ниже.
+        const survey = parcelSurvey(s, px, py);
+        const reserves = survey.light + survey.heavy * 0.7;
         if (!best || reserves > best.reserves) best = { px, py, reserves };
       }
     }

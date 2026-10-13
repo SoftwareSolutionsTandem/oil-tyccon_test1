@@ -43,6 +43,7 @@ button.active { outline: 2px solid var(--accent); }
 .brand { font-weight: 800; letter-spacing: 0.12em; color: var(--accent); font-size: 15px; }
 .stat { display: flex; flex-direction: column; min-width: 90px; }
 .stat .label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.stat .sub { font-size: 10px; color: var(--muted); white-space: nowrap; }
 .stat .value { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .stat .value.neg { color: var(--bad); }
 .stat .value.pos { color: var(--good); }

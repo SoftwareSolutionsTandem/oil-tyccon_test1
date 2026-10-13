@@ -49,17 +49,22 @@ export function isParcelAdjacentToOwned(s: GameState, px: number, py: number): b
 }
 
 /** Сводка по месторождениям участка — то, что видит игрок до покупки. */
-export function parcelSurvey(s: GameState, px: number, py: number): { tiles: number; reserves: number } {
+export function parcelSurvey(s: GameState, px: number, py: number): { tiles: number; reserves: number; light: number; heavy: number } {
   let tiles = 0;
   let reserves = 0;
+  let light = 0;
+  let heavy = 0;
   for (let y = py * PARCEL_SIZE; y < (py + 1) * PARCEL_SIZE; y++) {
     for (let x = px * PARCEL_SIZE; x < (px + 1) * PARCEL_SIZE; x++) {
-      const r = s.map.reserve[tileIndex(s, x, y)];
+      const i = tileIndex(s, x, y);
+      const r = s.map.reserve[i];
       if (r > 0) {
         tiles++;
         reserves += r;
+        if (s.map.grade[i] === 1) heavy += r;
+        else light += r;
       }
     }
   }
-  return { tiles, reserves };
+  return { tiles, reserves, light, heavy };
 }

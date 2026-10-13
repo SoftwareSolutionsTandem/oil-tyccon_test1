@@ -378,12 +378,14 @@ export class Renderer {
       zoneOf = { id: -1, type: 'pumpjack', x: view.hover.x, y: view.hover.y, level: 1, enabled: true, invested: 0, status: 'ok' };
     }
     if (zoneOf && s.map.initial[zoneOf.y * n + zoneOf.x] > 0) {
+      // Зона тяжёлой нефти — янтарная, лёгкой — бирюзовая: сорт виден при размещении.
+      const heavy = s.map.grade[zoneOf.y * n + zoneOf.x] === 1;
       for (const i of drainageTiles(s, zoneOf)) {
         const zx = i % n;
         const zy = Math.floor(i / n);
-        ctx.fillStyle = 'rgba(92,225,230,0.16)';
+        ctx.fillStyle = heavy ? 'rgba(235,170,70,0.2)' : 'rgba(92,225,230,0.16)';
         ctx.fillRect(zx, zy, 1, 1);
-        this.tileOutline(zx, zy, 'rgba(92,225,230,0.55)', 0.025);
+        this.tileOutline(zx, zy, heavy ? 'rgba(235,170,70,0.65)' : 'rgba(92,225,230,0.55)', 0.025);
       }
     }
     if (view.network) this.drawNetworkOverlay(s, view, selected ?? null);
@@ -1153,6 +1155,7 @@ export class Renderer {
       waiting_price: ['$', '#d4a017'],
       no_route: ['⌁', '#e0533d'],
       throttled: ['≈', '#d4a017'],
+      wrong_grade: ['!', '#8a5a2b'],
     };
     const badge = badges[b.status];
     if (!badge) return;

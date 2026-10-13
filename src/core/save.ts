@@ -1,7 +1,9 @@
 import { planAutoConnect } from './actions';
 import { bestConnect } from './connect';
 import { levelSpec } from './economy';
+import { PARCEL_SIZE } from './config';
 import { syncOil } from './network';
+import { isParcelOwned } from './world';
 import { createNewGame, SAVE_VERSION } from './state';
 import type { GameState } from './types';
 
@@ -33,10 +35,61 @@ export function deserialize(json: string): GameState | null {
     return null;
   }
   const state: GameState = { ...reference, ...s };
+  // Сорта не зависят от труб, а подключение при миграции v1 уже считает поток с сортами — поэтому сначала сорта.
+  if (s.version < 3) migrateV2(state, reference);
+  else if (!Array.isArray(state.map.grade) || state.map.grade.length !== reference.map.grade.length) return null;
   if (s.version < 2) migrateV1(state, reference);
   else if (!Array.isArray(state.map.pipes) || state.map.pipes.length !== reference.map.pipes.length) return null;
   state.version = SAVE_VERSION;
   return state;
+}
+
+/**
+ * v2 → v3: сорта нефти.
+ * - Вся нефть в хранилищах и все месторождения, которые игрок уже мог видеть или трогать, — лёгкие:
+ *   лёгкая продаётся по прежней рыночной цене, поэтому ни объём, ни стоимость запасов не меняются.
+ * - Месторождения целиком на чужих участках и нетронутые получают сорт и запасы как в новой игре с тем же
+ *   seed (генерация совпадает, отличаются только сорта и запасы тяжёлых) — старые игры тоже встретят тяжёлую нефть.
+ */
+function migrateV2(s: GameState, reference: GameState): void {
+  const n = s.map.size;
+  const grade = new Array<number>(n * n).fill(0);
+  const reserve = [...s.map.reserve];
+  const initial = [...s.map.initial];
+  const seen = new Uint8Array(n * n);
+  for (let i = 0; i < n * n; i++) {
+    if (initial[i] <= 0 || seen[i]) continue;
+    const comp: number[] = [i];
+    seen[i] = 1;
+    for (let q = 0; q < comp.length; q++) {
+      const x = comp[q] % n;
+      const y = (comp[q] - x) / n;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+        const j = ny * n + nx;
+        if (initial[j] > 0 && !seen[j]) {
+          seen[j] = 1;
+          comp.push(j);
+        }
+      }
+    }
+    const untouched = comp.every(
+      (j) =>
+        reserve[j] === initial[j] &&
+        !isParcelOwned(s, Math.floor((j % n) / PARCEL_SIZE), Math.floor(j / n / PARCEL_SIZE)) &&
+        reference.map.initial[j] > 0,
+    );
+    if (!untouched) continue;
+    for (const j of comp) {
+      grade[j] = reference.map.grade[j];
+      reserve[j] = reference.map.reserve[j];
+      initial[j] = reference.map.initial[j];
+    }
+  }
+  s.map = { ...s.map, grade, reserve, initial };
+  for (const b of s.buildings) if (b.type === 'hq' || b.type === 'tank') b.grade = 0;
 }
 
 /**

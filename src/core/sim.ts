@@ -16,9 +16,8 @@ export function tick(s: GameState, dt: number): TickEvents {
   s.time += dt;
   updateMarket(s, dt);
 
-  // 1–2. Логистика: добыча через сеть трубопроводов в хранилища своей сети и продажа через терминалы этой сети.
-  const priceOk = s.market.price >= s.sellThreshold;
-  const flow = stepLogistics(s, dt, s.market.price, priceOk);
+  // 1–2. Логистика: добыча через сеть трубопроводов в хранилища своей сети и продажа через терминалы этой сети (по цене сорта).
+  const flow = stepLogistics(s, dt);
   s.totals.produced += flow.produced;
   recordStat(s, 'produced', flow.produced);
   const autoSold = flow.sold;

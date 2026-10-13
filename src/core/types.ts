@@ -6,9 +6,10 @@ export type BuildableType = Exclude<BuildingType, 'hq'>;
  * ok — работает; off — законсервировано игроком; depleted — месторождение исчерпано;
  * full — добыча ограничена заполненным хранилищем своей сети; waiting_price — терминал ждёт нужной цены;
  * no_oil — терминалу нечего продавать; no_route — нет трубопровода к хранилищу;
+ * wrong_grade — места в достижимых хранилищах нет для этого сорта (они заняты нефтью другого сорта);
  * throttled — добыча ограничена пропускной способностью трубопровода.
  */
-export type BuildingStatus = 'ok' | 'off' | 'depleted' | 'full' | 'waiting_price' | 'no_oil' | 'no_route' | 'throttled';
+export type BuildingStatus = 'ok' | 'off' | 'depleted' | 'full' | 'waiting_price' | 'no_oil' | 'no_route' | 'throttled' | 'wrong_grade';
 
 export interface Building {
   id: number;
@@ -23,7 +24,12 @@ export interface Building {
   status: BuildingStatus;
   /** Нефть в этом хранилище (только у конторы и резервуаров), баррели. */
   stored?: number;
+  /** Сорт нефти в хранилище (0 — лёгкая, 1 — тяжёлая); имеет смысл, пока stored > 0. Хранилище не смешивает сорта. */
+  grade?: Grade;
 }
+
+/** Сорт нефти: 0 — лёгкая, 1 — тяжёлая. */
+export type Grade = 0 | 1;
 
 /** Тип трубопровода на клетке: 0 — нет, 1 — промысловый, 2 — магистральный. */
 export type PipeKind = 0 | 1 | 2;
@@ -40,6 +46,8 @@ export interface WorldMap {
   owned: boolean[];
   /** Трубопровод на клетке (PipeKind). Индекс как у reserve. */
   pipes: number[];
+  /** Сорт нефти месторождения в клетке (Grade); одинаков для всех клеток одного месторождения. */
+  grade: number[];
 }
 
 /** Денежные и товарные потоки за одну секунду игрового времени. */

@@ -1,9 +1,9 @@
-import { HQ_POS, MAP_SIZE, MARKET, PARCEL_SIZE, PARCELS_PER_SIDE, START_CASH, START_PARCEL } from './config';
+import { GRADES, HEAVY_CHANCE, HQ_POS, MAP_SIZE, MARKET, PARCEL_SIZE, PARCELS_PER_SIDE, START_CASH, START_PARCEL } from './config';
 import { emptyBucket } from './economy';
 import { Rng } from './rng';
 import type { GameState, WorldMap } from './types';
 
-export const SAVE_VERSION = 2;
+export const SAVE_VERSION = 3;
 
 export function createNewGame(seed: number = (Math.random() * 2 ** 31) | 0): GameState {
   const map = generateMap(seed);
@@ -72,7 +72,54 @@ function generateMap(seed: number): WorldMap {
   }
   decor[HQ_POS.y * size + HQ_POS.x] = 0;
 
-  return { size, reserve, initial: [...reserve], decor, owned, pipes: new Array<number>(size * size).fill(0) };
+  const grade = assignGrades(seed, reserve, size);
+  return { size, reserve, initial: [...reserve], decor, owned, pipes: new Array<number>(size * size).fill(0), grade };
+}
+
+/**
+ * Сорта месторождений. Месторождение — связная группа клеток с запасами: у всех его клеток один сорт,
+ * поэтому зона дренирования качалки никогда не смешивает сорта. Стартовый участок — лёгкая нефть, дальше
+ * тяжёлые встречаются чаще. Отдельный ГСЧ от seed: сорта не сдвигают генерацию запасов и декора.
+ * Запасы тяжёлых месторождений умножаются на GRADES[1].reserveFactor.
+ */
+function assignGrades(seed: number, reserve: number[], size: number): number[] {
+  const rng = new Rng((seed ^ 0x2c1b3c6d) >>> 0);
+  const grade = new Array<number>(size * size).fill(0);
+  const seen = new Uint8Array(size * size);
+  for (let i = 0; i < reserve.length; i++) {
+    if (reserve[i] <= 0 || seen[i]) continue;
+    const comp: number[] = [i];
+    seen[i] = 1;
+    for (let q = 0; q < comp.length; q++) {
+      const x = comp[q] % size;
+      const y = (comp[q] - x) / size;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+        const j = ny * size + nx;
+        if (reserve[j] > 0 && !seen[j]) {
+          seen[j] = 1;
+          comp.push(j);
+        }
+      }
+    }
+    // Удалённость участка — по самой близкой к старту клетке месторождения.
+    let dist = Infinity;
+    for (const j of comp) {
+      const px = Math.floor((j % size) / PARCEL_SIZE);
+      const py = Math.floor(j / size / PARCEL_SIZE);
+      dist = Math.min(dist, Math.abs(px - START_PARCEL.px) + Math.abs(py - START_PARCEL.py));
+    }
+    const chance = HEAVY_CHANCE[Math.min(dist, HEAVY_CHANCE.length - 1)];
+    if (rng.next() < chance) {
+      for (const j of comp) {
+        grade[j] = 1;
+        reserve[j] = Math.round(reserve[j] * GRADES[1].reserveFactor);
+      }
+    }
+  }
+  return grade;
 }
 
 function growBlob(

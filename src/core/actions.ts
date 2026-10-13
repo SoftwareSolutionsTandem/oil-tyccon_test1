@@ -2,13 +2,15 @@ import { BUILDINGS, MANUAL_SELL_FACTOR, PARCELS_PER_SIDE, PIPE_REFUND, PIPES } f
 import {
   buildCost,
   demolishRefund,
+  gradePrice,
   levelSpec,
+  oilByGrade,
   parcelPrice,
   recordStat,
   upgradeCost,
 } from './economy';
-import { componentOf, getNetwork, lastFlow, storedIn, syncOil } from './network';
-import type { ActionResult, BuildableType, GameState } from './types';
+import { componentOf, getNetwork, lastFlow, syncOil } from './network';
+import type { ActionResult, BuildableType, GameState, Grade } from './types';
 import {
   buildingAt,
   getBuilding,
@@ -124,10 +126,8 @@ export function canDemolish(s: GameState, id: number): ActionResult {
   if (!b) return fail('Здание не найдено');
   if (b.type === 'hq') return fail('Контору снести нельзя');
   if (b.type === 'tank' && (b.stored ?? 0) > 1e-6) {
-    // Нефть резервуара перетекает в остальные хранилища его сети — если там есть место.
-    const c = componentOf(s, b);
-    const free = c ? c.capacity - levelSpec(b).value - (storedIn(c) - (b.stored ?? 0)) : 0;
-    if (free < (b.stored ?? 0)) return fail('Сначала продайте нефть — она не поместится в оставшиеся хранилища сети');
+    // Нефть резервуара перетекает в остальные хранилища его сети — если там есть место для её сорта.
+    if (spillRoom(s, b).total < (b.stored ?? 0)) return fail('Сначала продайте нефть — она не поместится в оставшиеся хранилища сети (с учётом сорта)');
   }
   return OK;
 }
@@ -140,16 +140,26 @@ export function demolish(s: GameState, id: number): ActionResult {
   s.cash += refund;
   s.totals.refunds += refund;
   const oil = b.stored ?? 0;
-  const others = b.type === 'tank' ? (componentOf(s, b)?.storages ?? []).filter((o) => o.id !== b.id) : [];
+  const spill = b.type === 'tank' && oil > 0 ? spillRoom(s, b) : null;
   s.buildings = s.buildings.filter((other) => other.id !== id);
-  if (oil > 0) {
-    // Переливаем в бывших соседей по сети пропорционально свободному месту (проверено в canDemolish).
-    const free = others.map((o) => Math.max(0, levelSpec(o).value - (o.stored ?? 0)));
-    const sum = free.reduce((a, v) => a + v, 0);
-    others.forEach((o, i) => (o.stored = (o.stored ?? 0) + (sum > 0 ? (oil * free[i]) / sum : 0)));
+  if (spill && spill.total > 0) {
+    // Переливаем в бывших соседей по сети (пустые или того же сорта) пропорционально свободному месту.
+    spill.targets.forEach(({ o, free }) => {
+      o.stored = (o.stored ?? 0) + (oil * free) / spill.total;
+      o.grade = b.grade ?? 0;
+    });
   }
   syncOil(s);
   return OK;
+}
+
+/** Куда можно перелить нефть сносимого резервуара: хранилища его сети, пустые или с нефтью того же сорта. */
+function spillRoom(s: GameState, b: GameState['buildings'][number]) {
+  const g = b.grade ?? 0;
+  const targets = (componentOf(s, b)?.storages ?? [])
+    .filter((o) => o.id !== b.id && ((o.stored ?? 0) <= 1e-9 || (o.grade ?? 0) === g))
+    .map((o) => ({ o, free: Math.max(0, levelSpec(o).value - (o.stored ?? 0)) }));
+  return { targets, total: targets.reduce((a, t) => a + t.free, 0) };
 }
 
 export function toggleEnabled(s: GameState, id: number): ActionResult {
@@ -159,8 +169,15 @@ export function toggleEnabled(s: GameState, id: number): ActionResult {
   return OK;
 }
 
-export function manualSellPrice(s: GameState): number {
-  return s.market.price * MANUAL_SELL_FACTOR;
+/** Цена перекупщика за баррель лёгкой (по умолчанию) или тяжёлой нефти. */
+export function manualSellPrice(s: GameState, g: Grade = 0): number {
+  return gradePrice(s, g) * MANUAL_SELL_FACTOR;
+}
+
+/** Сколько заплатит перекупщик за всю нефть сейчас (каждый сорт по своей цене). */
+export function manualSellValue(s: GameState): number {
+  const [light, heavy] = oilByGrade(s);
+  return light * manualSellPrice(s, 0) + heavy * manualSellPrice(s, 1);
 }
 
 /** Ручная продажа всей нефти перекупщику. Возвращает выручку. */
@@ -173,7 +190,7 @@ export function sellManual(s: GameState): { ok: true; amount: number; revenue: n
   syncOil(s);
   if (s.oil < 1) return { ok: false, reason: 'На складе нет нефти' };
   const amount = s.oil;
-  const revenue = amount * manualSellPrice(s);
+  const revenue = manualSellValue(s);
   for (const b of s.buildings) if (b.stored !== undefined) b.stored = 0;
   syncOil(s);
   s.cash += revenue;
