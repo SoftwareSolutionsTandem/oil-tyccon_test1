@@ -170,10 +170,42 @@ function nearestFreeTile(s: GameState, x: number, y: number, maxDist = Infinity)
   return best;
 }
 
+/** Радиус, в котором бот ставит и улучшает терминал у полного хранилища, клеток. */
+const SELL_RADIUS = 3;
+
 /**
- * Узкие места: маршрут ограниченной трубой качалки заменяется магистралью; если и магистраль перегружена —
- * рядом с качалкой ставится резервуар-коллектор, подключённый магистралью к сети: соседние качалки качают
- * в него коротким путём, а терминал забирает из него одним потоком.
+ * Вывоз у полного хранилища: улучшить его терминал; если терминалы рядом на максимуме — поставить ещё один.
+ * 'acted' — сделано, 'wait' — копим деньги, 'none' — у этого хранилища сделать нечего (нет места).
+ */
+function sellAtStorage(s: GameState, st: GameState['buildings'][number]): 'acted' | 'wait' | 'none' {
+  // Терминалы этого хранилища — в пределах SELL_RADIUS (дальние подключены магистралью, см. ниже).
+  const terms = s.buildings.filter((o) => o.type === 'terminal' && Math.abs(o.x - st.x) + Math.abs(o.y - st.y) <= SELL_RADIUS);
+  const term = terms.find((o) => upgradeCost(o) !== null);
+  if (term) {
+    const c = upgradeCost(term)!;
+    if (s.cash < c) return 'wait';
+    upgrade(s, term.id);
+    return 'acted';
+  }
+  // Вплотную — без трубы; если рядом места нет — в паре клеток с подключением магистралью.
+  const t = nearestFreeTile(s, st.x, st.y, SELL_RADIUS);
+  if (!t) return 'none';
+  if (s.cash < buildCost(s, 'terminal')) return 'wait';
+  if (!build(s, 'terminal', t.x, t.y).ok) return 'none';
+  if (Math.abs(t.x - st.x) + Math.abs(t.y - st.y) > 1) autoConnect(s, s.buildings[s.buildings.length - 1].id, 2);
+  return 'acted';
+}
+
+/**
+ * Узкие места, по порядку:
+ * 1) терминал или НПЗ упирается в промысловую трубу — она меняется на магистраль («Усилить маршрут»);
+ * 2) у качалки «склад полон» — терминал у ближайшего хранилища или его улучшение;
+ * 3) промысловые трубы на маршруте качалки к ближайшему хранилищу — на магистраль;
+ * 4) ближайшее хранилище полно и нефть идёт дальше — по узкой клетке фактического пути качалки: промысловая
+ *    труба — на магистраль; магистраль — вывоз у источника (терминал у полного хранилища), как в п. 2;
+ * 5) иначе, если и магистраль перегружена, — резервуар-коллектор рядом с качалкой, подключённый магистралью:
+ *    соседние качалки качают в него коротким путём, а терминал забирает из него одним потоком.
+ * Если для качалки сделать нечего, бот смотрит следующую, а не застревает на ней.
  */
 function fixBottlenecks(s: GameState): void {
   if (!lastFlow(s)) return;
@@ -190,33 +222,52 @@ function fixBottlenecks(s: GameState): void {
     return;
   }
   const net = getNetwork(s);
+  const flow = lastFlow(s)!;
+  const xy = (t: number) => [t % s.map.size, Math.floor(t / s.map.size)] as [number, number];
+  // Вывоз упирается в промысловую трубу (терминал или НПЗ «ограничен трубой») — она меняется на магистраль,
+  // как кнопкой «Усилить маршрут»: иначе нефть копится в дальних коллекторах, а качалки стоят.
+  for (const o of s.buildings) {
+    if ((o.type !== 'terminal' && o.type !== 'refinery') || o.status !== 'throttled') continue;
+    const c = flow.clients.get(o.id);
+    const bt = c?.bottleneck ?? -1;
+    if (bt < 0 || s.map.pipes[bt] !== 1) continue;
+    const path = [...new Set([bt, ...c!.path])].filter((t) => s.map.pipes[t] === 1).map(xy);
+    if (s.cash > path.length * 60) layPipes(s, path, 2);
+    return;
+  }
   for (const b of s.buildings) {
     if (b.type !== 'pumpjack' || (b.status !== 'throttled' && b.status !== 'full')) continue;
+    const st = net.reach.get(b.id)?.[0]?.storage;
     if (b.status === 'full') {
       // Хранилище у качалки полно: не хватает вывоза — терминал прямо у ближайшего хранилища или его улучшение.
-      const st = net.reach.get(b.id)?.[0]?.storage;
       if (!st || !s.unlocked.includes('terminal')) continue;
-      const term = s.buildings.find((o) => o.type === 'terminal' && Math.abs(o.x - st.x) + Math.abs(o.y - st.y) === 1);
-      if (term) {
-        const c = upgradeCost(term);
-        if (c !== null && s.cash >= c) upgrade(s, term.id);
-      } else {
-        const t = nearestFreeTile(s, st.x, st.y, 1);
-        if (t && s.cash >= buildCost(s, 'terminal')) build(s, 'terminal', t.x, t.y);
-      }
+      if (sellAtStorage(s, st) === 'none') continue; // у этого хранилища делать нечего — следующая качалка
       return;
     }
     const route = net.routes.get(b.id) ?? [];
-    const tiles = route.filter((t) => s.map.pipes[t] === 1).map((t) => [t % s.map.size, Math.floor(t / s.map.size)] as [number, number]);
+    const tiles = route.filter((t) => s.map.pipes[t] === 1).map(xy);
     if (tiles.length) {
       if (s.cash > tiles.length * 60) layPipes(s, tiles, 2);
-    } else {
-      // Короткий маршрут перегружен чужими потоками — разгружать надо дальние качалки, а не эту.
-      if ((net.reach.get(b.id)?.[0]?.length ?? 0) <= 3) continue;
-      if (s.unlocked.includes('tank') && s.cash > buildCost(s, 'tank') * 1.5 + 500) {
-        const t = nearestFreeTile(s, b.x, b.y, 4);
-        if (t && build(s, 'tank', t.x, t.y).ok) autoConnect(s, s.buildings[s.buildings.length - 1].id, 2);
+      return;
+    }
+    // Ближайшее хранилище полно — нефть идёт дальше, и узкое место лежит на фактическом пути качалки, а не на
+    // маршруте к ближайшему хранилищу: промысловую трубу там меняем на магистраль; если упирается магистраль,
+    // улучшать нечего — вывоз у источника, как при «склад полон» (дальний промысел за единственной магистралью).
+    if (st && levelSpec(st).value - (st.stored ?? 0) <= 1e-6) {
+      const c = flow.clients.get(b.id);
+      const bt = c?.bottleneck ?? -1;
+      if (bt >= 0 && s.map.pipes[bt] === 1) {
+        const path = [...new Set([bt, ...c!.path])].filter((t) => s.map.pipes[t] === 1).map(xy);
+        if (s.cash > path.length * 60) layPipes(s, path, 2);
+        return;
       }
+      if (bt >= 0 && s.map.pipes[bt] === 2 && s.unlocked.includes('terminal') && sellAtStorage(s, st) !== 'none') return;
+    }
+    // Короткий маршрут перегружен чужими потоками — разгружать надо дальние качалки, а не эту.
+    if ((net.reach.get(b.id)?.[0]?.length ?? 0) <= 3) continue;
+    if (s.unlocked.includes('tank') && s.cash > buildCost(s, 'tank') * 1.5 + 500) {
+      const t = nearestFreeTile(s, b.x, b.y, 4);
+      if (t && build(s, 'tank', t.x, t.y).ok) autoConnect(s, s.buildings[s.buildings.length - 1].id, 2);
     }
     return;
   }
