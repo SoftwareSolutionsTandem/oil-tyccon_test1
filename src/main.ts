@@ -93,6 +93,7 @@ function runOffline(seconds: number, title: string): void {
   if (seconds < 5) return;
   const report = core.simulateOffline(game.state, seconds);
   for (const o of report.completed) game.announce(o);
+  for (const r of report.researched) game.announceResearch(r);
   if (report.seconds < 30) return;
   const capped = seconds > core.OFFLINE_CAP ? ` (учтено не более ${duration(core.OFFLINE_CAP)})` : '';
   hud.modal(
@@ -105,6 +106,7 @@ function runOffline(seconds: number, title: string): void {
        <li>Расходы на содержание: ${money(report.expenses)}</li>
        <li><b>Итого: ${money(report.revenue - report.expenses)}</b></li>
      </ul>
+     ${report.researched.length ? `<p>Завершены исследования:</p><ul>${report.researched.map((r) => `<li>${core.TECHS[r.id].name} — уровень ${r.level}</li>`).join('')}</ul>` : ''}
      ${report.sold < report.produced * 0.5 && report.produced > 0 ? '<p class="small">Совет: без терминала нефть копится на складе, а качалки простаивают. Терминал продаёт автоматически.</p>' : ''}`,
     [{ label: 'Отлично', primary: true }],
   );

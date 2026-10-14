@@ -45,6 +45,11 @@ export function techLevel(s: GameState, id: TechId): number {
   return s.research?.levels[id] ?? 0;
 }
 
+/** Множитель содержания от «энергосбережения» (1 — без технологии). */
+export function upkeepFactor(s: GameState): number {
+  return 1 - TECHS.energy.step * techLevel(s, 'energy');
+}
+
 /** Нижний предел добычи при истощении: DEPLETION_MIN_FACTOR, поднятый технологией «нефтеотдача». */
 export function depletionFloor(s: GameState): number {
   return DEPLETION_MIN_FACTOR + TECHS.eor.step * techLevel(s, 'eor');
@@ -155,9 +160,17 @@ export function drainagePool(s: GameState, b: Building): { reserve: number; init
 /** Текущая добыча качалки без учёта ограничения хранилища, барр./с. */
 export function pumpRate(s: GameState, b: Building): number {
   const pool = drainagePool(s, b);
-  if (pool.initial <= 0 || pool.reserve <= 0) return 0;
+  return rateFromPool(s, b, pool.reserve, pool.initial);
+}
+
+/**
+ * Единственная формула добычи: номинал × (m + (1 − m) · остаток/начальные), m — порог истощения с учётом
+ * технологии. По уже посчитанной зоне дренирования — её использует и логистика (network.ts) без повторного обхода.
+ */
+export function rateFromPool(s: GameState, b: Building, reserve: number, initial: number): number {
+  if (initial <= 0 || reserve <= 0) return 0;
   const m = depletionFloor(s);
-  return nominalRate(s, b) * (m + (1 - m) * (pool.reserve / pool.initial));
+  return nominalRate(s, b) * (m + (1 - m) * (reserve / initial));
 }
 
 /** Сорт нефти, которую добывает качалка: сорт месторождения её клетки (зона дренирования одного сорта). */
@@ -284,7 +297,7 @@ export function terminalThroughput(s: GameState): number {
  * без s — базовое содержание уровня (для справочных расчётов, где компании нет).
  */
 export function buildingUpkeep(b: Building, s?: GameState): number {
-  const upkeep = levelSpec(b).upkeep * (s ? 1 - TECHS.energy.step * techLevel(s, 'energy') : 1);
+  const upkeep = levelSpec(b).upkeep * (s ? upkeepFactor(s) : 1);
   return b.enabled ? upkeep : upkeep * MOTHBALL_UPKEEP;
 }
 

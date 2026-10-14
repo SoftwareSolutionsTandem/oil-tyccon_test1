@@ -251,7 +251,7 @@ export class Hud {
       card.querySelector('.cost')!.textContent = unlocked ? money(cost) : '🔒';
       let meta: string;
       if (unlocked) {
-        meta = `${spec.valueLabel}: ${num(lvl.value * (type === 'tank' ? 1 : 60))} ${type === 'tank' ? 'барр.' : 'барр./мин'} · содержание ${money(lvl.upkeep * 60)}/мин`;
+        meta = `${spec.valueLabel}: ${num(lvl.value * (type === 'tank' ? 1 : 60))} ${type === 'tank' ? 'барр.' : 'барр./мин'} · содержание ${money(lvl.upkeep * core.upkeepFactor(s) * 60)}/мин`;
       } else {
         const by = core.OBJECTIVES.find((o) => o.unlocks?.includes(type));
         meta = by ? `Откроется после цели «${by.title}»` : 'Пока недоступно';
@@ -484,7 +484,7 @@ export class Hud {
     const allowed = ([0, 1] as const).filter((g) => (plan.filterMask >> g) & 1);
     const best = Math.max(...allowed.map((g) => core.refineryMargin(s, g)));
     const running = b.marginOnly === false || best > 0;
-    const net = ((running ? cap * best : 0) - core.levelSpec(b).upkeep) * 60;
+    const net = ((running ? cap * best : 0) - core.buildingUpkeep(b, s)) * 60;
     return `${head}
       ${also.map((a) => `<div class="small" style="color:var(--warn)">Также: ${a}</div>`).join('')}
       ${kv('Переработка', `${rate(actual * 60)} из ${rate(cap * 60)} · ${Math.round((actual / cap) * 100)}%`)}
@@ -566,7 +566,7 @@ export class Hud {
     const name = core.buildingName(b.type);
     const [statusText, statusCls] = STATUS_TEXT[b.status];
     const head = `<div class="sel-title">${name}${b.type !== 'hq' ? ` · ур. ${b.level}` : ''}</div><span class="status ${statusCls}">${statusText}</span>`;
-    const upkeep = kv('Содержание', `${money(core.buildingUpkeep(b) * 60)}/мин`);
+    const upkeep = kv('Содержание', `${money(core.buildingUpkeep(b, s) * 60)}/мин`);
     if (b.type === 'hq') {
       return `${head}${kv('Склад при конторе', `${num(b.stored ?? 0)} / ${num(core.HQ_STORAGE)} барр.`)}${this.storageGrade(b)}${this.networkSummary(core.componentOf(s, b))}${kv('Перекупщик платит', `лёгк. ${price(core.manualSellPrice(s, 0))} · тяж. ${price(core.manualSellPrice(s, 1))}`)}<div class="small">Здесь начинается ваша компания. Перекупщик забирает нефть из всех хранилищ сразу (своими машинами, трубы не нужны), но платит на 20% меньше рынка.</div>`;
     }
@@ -588,8 +588,8 @@ export class Hud {
         ${kv(`Запасы зоны (${zone} кл.)`, `${num(pool.reserve)} / ${num(pool.initial)}`)}
         ${kv('Хватит при работе без простоев', r > 0 ? duration(timeLeft) : '—')}
         ${this.connectionInfo(b)}
-        ${next ? `<div class="sep"></div>${kv('След. уровень: добыча', rate(next.value * 60 * (r / core.nominalRate(s, b) || 1)))}${kv('След. уровень: содержание', `${money(next.upkeep * 60)}/мин`)}` : ''}
-        <div class="small" style="margin-top:6px">Скважина тянет нефть из своей клетки и соседних по сторонам клеток месторождения (зона подсвечена). Добыча снижается по мере истощения (до ${Math.round(core.DEPLETION_MIN_FACTOR * 100)}% от номинала).</div>`;
+        ${next ? `<div class="sep"></div>${kv('След. уровень: добыча', rate(next.value * 60 * (r / core.nominalRate(s, b) || 1)))}${kv('След. уровень: содержание', `${money(next.upkeep * core.upkeepFactor(s) * 60)}/мин`)}` : ''}
+        <div class="small" style="margin-top:6px">Скважина тянет нефть из своей клетки и соседних по сторонам клеток месторождения (зона подсвечена). Добыча снижается по мере истощения (до ${Math.round(core.depletionFloor(s) * 100)}% от номинала).</div>`;
     }
     if (b.type === 'tank') {
       return `${head}${kv('В резервуаре', `${num(b.stored ?? 0)} / ${num(spec.value)} барр.`)}${this.storageGrade(b)}${upkeep}<div class="sep"></div>${this.networkSummary(core.componentOf(s, b))}${kv('Вся нефть компании', `${num(s.oil)} / ${num(core.storageCapacity(s))}`)}${next ? `<div class="sep"></div>${kv('След. уровень: ёмкость', bbl(next.value))}` : ''}

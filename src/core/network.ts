@@ -1,5 +1,5 @@
 import { PIPES, REFINERY } from './config';
-import { depletionFloor, drainageTiles, gradePrice, levelSpec, nominalRate, productPrice, pumpGrade, refineryMargin, refineryProductCap, refineryShip } from './economy';
+import { drainageTiles, gradePrice, levelSpec, rateFromPool, productPrice, pumpGrade, refineryMargin, refineryProductCap, refineryShip } from './economy';
 import type { Building, GameState, Grade } from './types';
 
 /**
@@ -318,12 +318,6 @@ export function lastFlow(s: GameState): FlowInfo | undefined {
   return flows.get(s);
 }
 
-/** То же, что pumpRate, но по уже посчитанной зоне (без повторного обхода зданий). */
-function rateOf(s: GameState, b: Building, reserve: number, initial: number): number {
-  if (initial <= 0 || reserve <= 0) return 0;
-  const m = depletionFloor(s);
-  return nominalRate(s, b) * (m + (1 - m) * (reserve / initial));
-}
 
 const free = (b: Building) => Math.max(0, levelSpec(b).value - (b.stored ?? 0));
 
@@ -661,7 +655,7 @@ export function stepLogistics(s: GameState, dt: number): StepResult {
     if (pool <= 0) b.status = 'depleted';
     else if (!b.enabled) b.status = 'off';
     else if (!net.reach.has(b.id)) b.status = 'no_route';
-    else pumps.push({ ...client(b, Math.min(pool / dt, rateOf(s, b, pool, initial))), tiles, pool, grade: pumpGrade(s, b) });
+    else pumps.push({ ...client(b, Math.min(pool / dt, rateFromPool(s, b, pool, initial))), tiles, pool, grade: pumpGrade(s, b) });
   }
   const room = new Float64Array(net.storages.length);
   net.storages.forEach((st, i) => (room[i] = free(st)));
