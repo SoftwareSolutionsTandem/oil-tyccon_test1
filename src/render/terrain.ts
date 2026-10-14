@@ -1,3 +1,4 @@
+import { BASE_MAP_SIZE, MAP_OFFSET } from '../core/config';
 import { LIGHT } from './model';
 import { createCanvas, fbm, hash2, smoothstep, valueNoise } from './noise';
 
@@ -16,6 +17,20 @@ const DRY: RGBf = [170, 162, 104];
 const GREEN: RGBf = [118, 138, 74];
 const SAND: RGBf = [200, 182, 138];
 const DARK: RGBf = [138, 116, 86];
+/** Пустыня (веха 0.5): светлый песок, тени барханов, выгоревшие плешины. */
+const DUNE: RGBf = [230, 196, 130];
+const DUNE_SHADE: RGBf = [204, 160, 100];
+const DUNE_PALE: RGBf = [242, 222, 172];
+
+/**
+ * Доля пустыни в точке мира: восточнее старой карты (регион 1, core/world.ts regionAt) с мягким переходом в клетку
+ * у границы. За краем карты пустыня продолжается — окружение остаётся похожим на соседнюю землю.
+ */
+export function desertWeight(u: number, v: number): number {
+  const bx = u - MAP_OFFSET.x;
+  const by = v - MAP_OFFSET.y;
+  return smoothstep(BASE_MAP_SIZE - 0.7, BASE_MAP_SIZE + 0.9, bx) * (1 - smoothstep(BASE_MAP_SIZE - 0.9, BASE_MAP_SIZE + 0.7, by));
+}
 
 const mix = (a: RGBf, b: RGBf, t: number): RGBf => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 
@@ -75,12 +90,20 @@ export class TerrainLayer {
     let c = mix(DIRT, mix(DRY, GREEN, smoothstep(0.42, 0.68, f.moist)), grass);
     c = mix(c, SAND, smoothstep(0.6, 0.74, f.patch) * (1 - grass * 0.7));
     c = mix(c, DARK, smoothstep(0.62, 0.8, f.moist) * (1 - grass) * 0.4);
+    const w = desertWeight(u, v);
+    if (w > 0) {
+      // Барханы: гряды по высоте рельефа, светлые плешины по пятнам.
+      const ridge = smoothstep(0.35, 0.75, f.height);
+      let d = mix(DUNE_SHADE, DUNE, ridge);
+      d = mix(d, DUNE_PALE, smoothstep(0.55, 0.75, f.patch) * 0.7);
+      c = mix(c, d, w);
+    }
     return { color: c, height: f.height };
   }
 
   grassAt(u: number, v: number): number {
     const f = this.fields(u, v);
-    return smoothstep(0.42, 0.62, f.biome + (f.patch - 0.5) * 0.35);
+    return smoothstep(0.42, 0.62, f.biome + (f.patch - 0.5) * 0.35) * (1 - desertWeight(u, v));
   }
 
   canvases(): HTMLCanvasElement[] {
@@ -218,8 +241,30 @@ export class TerrainLayer {
     const s = this.seed;
     const h = (i: number) => hash2(tx * 31 + i, ty * 17 + i * 7, s + 11);
     const grass = this.grassAt(tx + 0.5, ty + 0.5);
+    // Рябь на песке пустыни: короткие дуги поперёк ветра (с северо-запада), светлая сторона к свету.
+    const desert = desertWeight(tx + 0.5, ty + 0.5);
+    if (desert > 0.3) {
+      const n = lod ? 2 : 4;
+      for (let i = 0; i < n; i++) {
+        const cx = tx + h(300 + i);
+        const cy = ty + h(320 + i);
+        const len = 0.18 + h(340 + i) * 0.22;
+        ctx.beginPath();
+        ctx.moveTo(cx - len, cy + len * 0.6);
+        ctx.quadraticCurveTo(cx, cy - len * 0.15, cx + len, cy - len * 0.6);
+        ctx.strokeStyle = `rgba(150,108,62,${(0.22 * desert).toFixed(3)})`;
+        ctx.lineWidth = 0.022;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cx - len, cy + len * 0.6 - 0.025);
+        ctx.quadraticCurveTo(cx, cy - len * 0.15 - 0.025, cx + len, cy - len * 0.6 - 0.025);
+        ctx.strokeStyle = `rgba(255,240,205,${(0.25 * desert).toFixed(3)})`;
+        ctx.lineWidth = 0.016;
+        ctx.stroke();
+      }
+    }
     // Трещины на сухой земле.
-    if (grass < 0.3 && h(1) < 0.35) {
+    if (grass < 0.3 && desert < 0.5 && h(1) < 0.35) {
       let x = tx + h(2);
       let y = ty + h(3);
       let a = h(4) * Math.PI * 2;

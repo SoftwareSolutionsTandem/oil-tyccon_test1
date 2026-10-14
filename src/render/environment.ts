@@ -5,7 +5,7 @@ import { isoX, isoY } from './iso';
 import { bakeSprite, MATERIALS as M, mat, type ModelPainter, type RGB, type Sprite, type V3 } from './model';
 import { createCanvas, grimeTexture, hash2, smoothstep, valueNoise } from './noise';
 import type { SpriteLibrary } from './sprites';
-import type { TerrainLayer } from './terrain';
+import { desertWeight, type TerrainLayer } from './terrain';
 import type { TerrainSource } from './terrainSource';
 
 /**
@@ -381,6 +381,8 @@ export class Environment {
   private decorAt(x: number, y: number): number {
     const r = hash2(x, y, 77);
     if (r >= 0.18) return 0; // дешёвая проверка до обращения к шуму
+    // Пустыня за восточным краем — только камни.
+    if (desertWeight(x + 0.5, y + 0.5) > 0.5) return r < 0.05 ? 2 : 0;
     const grove = this.terrain.sample(x * 0.5 + 500, y * 0.5 - 200).height;
     if (grove > 0.62) return 3;
     if (r < 0.035) return 1;

@@ -64,6 +64,8 @@ const GROUND: [number, number, number, number, number, number] = [32, 16, -32, 1
 const SHADOW_ALPHA = 0.5;
 /** Ячейка кеша земли, клеток: меньше ячейка — дешевле перепекание после строительства. */
 const CELL = 4;
+/** Ключ ячейки земли без смены строения мира пересчитывается раз в столько кадров (пятна нефти). */
+const KEY_REFRESH = 8;
 /** Разрешение запечённой земли относительно пикселей мира: своя земля резче чужой. */
 const GROUND_SCALE_HIGH = 2;
 const GROUND_SCALE_LOW = 1;
@@ -104,6 +106,9 @@ export class Renderer {
   private stains = makeStains(5, 17);
   private shadowSprites = new WeakMap<ShadowShape[], ShadowSprite>();
   private groundCache = new Map<number, GroundCell>();
+  private keyCache = new Map<number, string>();
+  private keySig = -1;
+  private keyFrame = 0;
   private width = 0;
   private height = 0;
   private dpr = 1;
@@ -164,6 +169,7 @@ export class Renderer {
       this.source?.dispose();
       this.source = new TerrainSource(s.seed, s.map.size);
       this.groundCache.clear();
+      this.keyCache.clear();
       this.env = new Environment(s, this.terrain, this.source, this.sprites, this.decals);
       this.firstFrame = true;
     }
@@ -424,6 +430,14 @@ export class Renderer {
     let rebaked = 0;
     let created = 0;
     const t0 = performance.now();
+    // Ключи ячеек: при смене строения мира (здания, земля, разведка, трубы) — все заново; иначе ключ ячейки
+    // пересчитывается раз в KEY_REFRESH кадров (пятна нефти бледнеют медленно), а не каждый кадр.
+    const sig = this.structureSignature(s);
+    if (sig !== this.keySig) {
+      this.keySig = sig;
+      this.keyCache.clear();
+    }
+    this.keyFrame++;
     for (let cy = 0; cy < cells; cy++) {
       for (let cx = 0; cx < cells; cx++) {
         const g = cellGeometry(cx * CELL, cy * CELL);
@@ -431,7 +445,11 @@ export class Renderer {
         const id = cy * cells + cx;
         const cell = this.groundCache.get(id);
         if (!this.firstFrame && (cell ? rebaked >= 1 : created >= 2)) continue; // недостающие видимые — до двух за кадр
-        const key = this.cellKey(s, cx * CELL, cy * CELL);
+        let key = this.keyCache.get(id);
+        if (key === undefined || (id + this.keyFrame) % KEY_REFRESH === 0) {
+          key = this.cellKey(s, cx * CELL, cy * CELL);
+          this.keyCache.set(id, key);
+        }
         if (cell && cell.key === key) continue;
         const baked = this.bakeCell(s, cx * CELL, cy * CELL, key);
         if (!baked) continue; // текстура ещё в работе — остаётся прежняя ячейка или заглушка
@@ -459,6 +477,25 @@ export class Renderer {
       if (requested === 0) this.env?.prebake(Math.max(2, 8 - (performance.now() - t0)));
     }
     this.firstFrame = false;
+  }
+
+  /** Числовая подпись строения мира: здания (место, уровень), свои участки, разведка, трубы. */
+  private structureSignature(s: GameState): number {
+    let h = 2166136261;
+    const mix = (v: number) => {
+      h ^= v;
+      h = Math.imul(h, 16777619);
+    };
+    mix(s.buildings.length);
+    for (const b of s.buildings) {
+      mix(b.id);
+      mix(b.x * 4096 + b.y);
+      mix(b.level);
+    }
+    const { owned, survey, pipes } = s.map;
+    for (let i = 0; i < owned.length; i++) mix((owned[i] ? 8 : 0) + (survey[i] ?? 0));
+    for (let i = 0; i < pipes.length; i++) if (pipes[i]) mix(i * 4 + pipes[i]);
+    return h >>> 0;
   }
 
   /** Ключ содержимого ячейки: качество, владение, уровни пятен, здания рядом и проходящие трассы. */

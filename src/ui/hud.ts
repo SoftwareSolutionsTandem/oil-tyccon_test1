@@ -577,7 +577,8 @@ export class Hud {
     } else if (sel?.kind === 'parcel') {
       const est = core.parcelEstimate(s, sel.px, sel.py);
       key = `p:${sel.px}:${sel.py}:${est.level}`;
-      const priceValue = core.parcelPrice(s);
+      const priceValue = core.parcelPrice(s, sel.px, sel.py);
+      const region = core.parcelRegion(sel.px, sel.py);
       const check = core.canBuyParcel(s, sel.px, sel.py);
       const range = (r: { low: number; high: number } | null) => (!r ? '?' : r.low === r.high ? `${num(r.low)} барр.` : `${num(r.low)}–${num(r.high)} барр.`);
       const levelText =
@@ -601,6 +602,8 @@ export class Hud {
       this.selectionInfo.innerHTML = `
         <div class="sel-title">Участок земли</div>
         <div class="small" style="margin-bottom:8px">Покупка расширяет территорию компании. После покупки запасы известны точно.</div>
+        ${kv('Регион', core.REGIONS[region].name)}
+        ${region === 1 ? `<div class="small" style="margin-bottom:6px">Пустыня: месторождения крупнее, почти вся нефть тяжёлая; содержание качалок ×${core.REGIONS[1].pumpUpkeep.toLocaleString('ru-RU')}. Цена земли пустыни растёт отдельно от степи.</div>` : ''}
         ${body}
         ${kv('Цена', money(priceValue))}
         ${!check.ok ? `<div class="small" style="color:var(--bad);margin-top:6px">${check.reason}</div>` : ''}`;
@@ -624,7 +627,7 @@ export class Hud {
       core.SURVEY_LEVELS.forEach((lv, i) => {
         const btn = this.selectionActions.querySelector<HTMLButtonElement>(`[data-role=survey-${i + 1}]`);
         if (!btn) return;
-        const cost = core.surveyCost(s, i + 1);
+        const cost = core.surveyCost(s, i + 1, sel.px, sel.py);
         btn.textContent = `${lv.name} · ${money(cost)} — ±${Math.round(lv.accuracy * 100)}%${lv.grade ? ' и сорт' : ''}`;
         btn.disabled = !core.canSurvey(s, sel.px, sel.py, i + 1).ok;
       });
