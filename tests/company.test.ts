@@ -28,6 +28,7 @@ import {
   type GameState,
 } from '../src/core';
 import { Rng } from '../src/core/rng';
+import { legacyMap } from './legacy';
 
 const HX = HQ_POS.x;
 const HY = HQ_POS.y;
@@ -246,6 +247,7 @@ describe('сохранения v7', () => {
   function asV6(s: GameState): string {
     const o = JSON.parse(serialize(s));
     o.version = 6;
+    legacyMap(o);
     delete o.managers;
     delete o.loan;
     for (const k of ['salaries', 'borrowed', 'repaid', 'interest']) delete o.totals[k];

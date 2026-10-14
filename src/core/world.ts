@@ -1,4 +1,4 @@
-import { PARCEL_SIZE, PARCELS_PER_SIDE, SURVEY_EXACT, SURVEY_LEVELS } from './config';
+import { BASE_MAP_SIZE, MAP_OFFSET, PARCEL_SIZE, PARCELS_PER_SIDE, REGIONS, SURVEY_EXACT, SURVEY_LEVELS } from './config';
 import { Rng } from './rng';
 import type { Building, GameState } from './types';
 
@@ -8,6 +8,46 @@ export function inBounds(s: GameState, x: number, y: number): boolean {
 
 export function tileIndex(s: GameState, x: number, y: number): number {
   return y * s.map.size + x;
+}
+
+/**
+ * Регион клетки по положению (веха 0.5): старая карта — степь (0); восточнее неё — пустыня (1); южнее — шельф (2,
+ * вместе с юго-восточным углом). Чистая функция координат: ею пользуются генерация карты и рендер земли (в том числе
+ * в Web Worker); в состоянии тот же результат хранится в map.region.
+ */
+export function regionAt(x: number, y: number): number {
+  const bx = x - MAP_OFFSET.x;
+  const by = y - MAP_OFFSET.y;
+  if (by >= BASE_MAP_SIZE) return 2;
+  if (bx >= BASE_MAP_SIZE) return 1;
+  return 0;
+}
+
+/** Регион участка (участок целиком лежит в одном регионе: границы кратны PARCEL_SIZE). */
+export function parcelRegion(px: number, py: number): number {
+  return regionAt(px * PARCEL_SIZE, py * PARCEL_SIZE);
+}
+
+/** Открыт ли регион для покупки земли: регион 0 — всегда, остальные — возможностью компании из цели. */
+export function regionOpen(s: GameState, r: number): boolean {
+  const f = REGIONS[r]?.feature;
+  return f === null || (f !== undefined && s.features.includes(f));
+}
+
+/** Число своих участков в регионе r. */
+export function ownedParcelsInRegion(s: GameState, r: number): number {
+  let k = 0;
+  for (let py = 0; py < PARCELS_PER_SIDE; py++)
+    for (let px = 0; px < PARCELS_PER_SIDE; px++) if (s.map.owned[parcelIndex(px, py)] && parcelRegion(px, py) === r) k++;
+  return k;
+}
+
+/** Число участков региона r, разведанных хотя бы съёмкой (свои — тоже). */
+export function surveyedParcelsInRegion(s: GameState, r: number): number {
+  let k = 0;
+  for (let py = 0; py < PARCELS_PER_SIDE; py++)
+    for (let px = 0; px < PARCELS_PER_SIDE; px++) if (parcelRegion(px, py) === r && surveyLevel(s, px, py) >= 1) k++;
+  return k;
 }
 
 export function parcelOf(x: number, y: number): { px: number; py: number } {

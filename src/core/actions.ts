@@ -1,4 +1,4 @@
-import { BUILDINGS, LOANS, MANUAL_SELL_FACTOR, PARCELS_PER_SIDE, PIPE_REFUND, PIPES, SURVEY_EXACT, SURVEY_LEVELS, TECHS } from './config';
+import { BUILDINGS, LOANS, MANUAL_SELL_FACTOR, PARCELS_PER_SIDE, PIPE_REFUND, PIPES, REGIONS, SURVEY_EXACT, SURVEY_LEVELS, TECHS } from './config';
 import {
   buildCost,
   demolishRefund,
@@ -20,6 +20,8 @@ import {
   getBuilding,
   inBounds,
   isParcelAdjacentToOwned,
+  parcelRegion,
+  regionOpen,
   isParcelOwned,
   isTileOwned,
   parcelIndex,
@@ -257,15 +259,16 @@ export function sellManual(s: GameState): { ok: true; amount: number; revenue: n
 export function canBuyParcel(s: GameState, px: number, py: number): ActionResult {
   if (px < 0 || py < 0 || px >= PARCELS_PER_SIDE || py >= PARCELS_PER_SIDE) return fail('Нет такого участка');
   if (isParcelOwned(s, px, py)) return fail('Участок уже ваш');
+  if (!regionOpen(s, parcelRegion(px, py))) return fail(`${REGIONS[parcelRegion(px, py)].name}: регион ещё не открыт`);
   if (!isParcelAdjacentToOwned(s, px, py)) return fail('Можно купить только соседний участок');
-  if (s.cash < parcelPrice(s)) return fail('Недостаточно денег');
+  if (s.cash < parcelPrice(s, px, py)) return fail('Недостаточно денег');
   return OK;
 }
 
 export function buyParcel(s: GameState, px: number, py: number): ActionResult {
   const check = canBuyParcel(s, px, py);
   if (!check.ok) return check;
-  const price = parcelPrice(s);
+  const price = parcelPrice(s, px, py);
   s.cash -= price;
   s.totals.capex += price;
   s.map.owned[parcelIndex(px, py)] = true;
@@ -273,16 +276,19 @@ export function buyParcel(s: GameState, px: number, py: number): ActionResult {
   return OK;
 }
 
-/** Цена разведки участка до уровня level (1 — съёмка, 2 — сейсморазведка): доля текущей цены участка. */
-export function surveyCost(s: GameState, level: number): number {
-  return Math.round(parcelPrice(s) * SURVEY_LEVELS[level - 1].costShare);
+/**
+ * Цена разведки участка до уровня level (1 — съёмка, 2 — сейсморазведка): доля текущей цены этого участка
+ * (цена — по его региону). Без участка — по цене следующего участка степи.
+ */
+export function surveyCost(s: GameState, level: number, px?: number, py?: number): number {
+  return Math.round(parcelPrice(s, px, py) * SURVEY_LEVELS[level - 1].costShare);
 }
 
 export function canSurvey(s: GameState, px: number, py: number, level: number): ActionResult {
   if (px < 0 || py < 0 || px >= PARCELS_PER_SIDE || py >= PARCELS_PER_SIDE) return fail('Нет такого участка');
   if (level < 1 || level > SURVEY_LEVELS.length) return fail('Нет такого вида разведки');
   if (surveyLevel(s, px, py) >= level) return fail('Уже разведано');
-  if (s.cash < surveyCost(s, level)) return fail('Недостаточно денег');
+  if (s.cash < surveyCost(s, level, px, py)) return fail('Недостаточно денег');
   return OK;
 }
 
@@ -290,7 +296,7 @@ export function canSurvey(s: GameState, px: number, py: number, level: number): 
 export function survey(s: GameState, px: number, py: number, level: number): ActionResult {
   const check = canSurvey(s, px, py, level);
   if (!check.ok) return check;
-  const cost = surveyCost(s, level);
+  const cost = surveyCost(s, level, px, py);
   s.cash -= cost;
   s.totals.capex += cost;
   s.map.survey[parcelIndex(px, py)] = level;

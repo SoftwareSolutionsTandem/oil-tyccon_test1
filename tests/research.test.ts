@@ -29,6 +29,7 @@ import {
   type GameState,
   type TechId,
 } from '../src/core';
+import { legacyMap } from './legacy';
 
 const HX = HQ_POS.x;
 const HY = HQ_POS.y;
@@ -291,6 +292,7 @@ describe('исследования: цель и сохранения', () => {
   function asV5(s: GameState): string {
     const old = JSON.parse(serialize(s));
     old.version = 5;
+    legacyMap(old);
     delete old.features;
     delete old.research;
     delete old.totals.research;

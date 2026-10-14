@@ -1,7 +1,7 @@
 import { capital, countOf, lastMinute } from './economy';
 import type { BuildableType, Feature, GameState } from './types';
 import { isConnected } from './network';
-import { ownedParcelCount } from './world';
+import { ownedParcelCount, surveyedParcelsInRegion } from './world';
 
 export interface Objective {
   id: string;
@@ -132,6 +132,14 @@ export const OBJECTIVES: Objective[] = [
     description: 'Нарастите капитал до $500 000: касса минус долг по кредиту.',
     reward: 0,
     progress: (s) => ({ current: capital(s), target: 500_000 }),
+  },
+  {
+    id: 'desert',
+    title: 'Выход в пустыню',
+    description: 'Закажите геологическую съёмку любого участка пустыни на востоке. Откроется покупка земли в пустыне: крупные месторождения, почти вся нефть тяжёлая, земля дешевле, но качалки там дороже в содержании.',
+    reward: 10_000,
+    features: ['desert'],
+    progress: (s) => ({ current: surveyedParcelsInRegion(s, 1), target: 1 }),
   },
 ];
 

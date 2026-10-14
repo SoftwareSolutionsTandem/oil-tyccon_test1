@@ -49,7 +49,7 @@ export interface Building {
 }
 
 /** Возможности компании, которые открываются целями (не здания): исследования, кредиты, менеджеры (веха 0.4). */
-export type Feature = 'research' | 'loans' | 'managers';
+export type Feature = 'research' | 'loans' | 'managers' | 'desert' | 'shelf';
 
 /** Технологии (веха 0.4, docs/M04_DESIGN.md §4): добыча, нефтеотдача, энергосбережение, типовой проект станка. */
 export type TechId = 'yield' | 'eor' | 'energy' | 'standard';
@@ -107,6 +107,8 @@ export interface WorldMap {
   grade: number[];
   /** Уровень разведки участка (0–2, 3 — известно точно). Индекс как у owned. */
   survey: number[];
+  /** Регион клетки (индекс REGIONS): 0 — степь, 1 — пустыня, 2 — шельф. Индекс как у reserve. */
+  region: number[];
 }
 
 /** Денежные и товарные потоки за одну секунду игрового времени. */

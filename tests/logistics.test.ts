@@ -32,6 +32,7 @@ import {
 } from '../src/core';
 import { Rng } from '../src/core/rng';
 import { runBot } from './bot';
+import { legacyMap } from './legacy';
 
 /**
  * Полигон: стартовый участок (16..23) без случайных месторождений, контора в (17,17).
@@ -286,6 +287,7 @@ describe('подключение с учётом загрузки сети', () 
     old.version = 1;
     delete old.map.pipes;
     for (const b of old.buildings) delete b.stored;
+    legacyMap(old);
     const migrated = deserialize(JSON.stringify(old))!;
     const pumps = migrated.buildings.filter((b) => b.type === 'pumpjack' && b.enabled);
     expect(pumps.length).toBeGreaterThan(15);
@@ -451,13 +453,14 @@ describe('сохранения', () => {
       delete b.grade;
     }
     old.oil = 123.5;
+    legacyMap(old);
     const cashBefore = old.cash;
     const migrated = deserialize(JSON.stringify(old))!;
     expect(migrated.version).toBe(SAVE_VERSION);
     expect(migrated.cash).toBe(cashBefore);
     expect(migrated.oil).toBeCloseTo(123.5, 9);
     expect(migrated.buildings.length).toBe(old.buildings.length);
-    expect(migrated.map.owned).toEqual(old.map.owned);
+    expect(migrated.map.owned).toEqual(s.map.owned);
     expect(migrated.objectiveIndex).toBe(4);
     for (const b of migrated.buildings) if (b.type === 'pumpjack' || b.type === 'terminal') expect(isConnected(migrated, b)).toBe(true);
     // Бесплатные трубы не меняют финансовый инвариант.

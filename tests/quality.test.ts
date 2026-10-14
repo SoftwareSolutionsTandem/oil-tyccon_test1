@@ -26,6 +26,7 @@ import {
   isParcelOwned,
   type GameState,
 } from '../src/core';
+import { legacyMap } from './legacy';
 
 const HX = HQ_POS.x;
 const HY = HQ_POS.y;
@@ -283,8 +284,9 @@ describe('сорта нефти: сохранения и офлайн', () => {
       if (s.map.grade[i] === 1) old.map.reserve[i] = old.map.initial[i] = Math.round(s.map.initial[i] / GRADES[1].reserveFactor);
     }
     // Одно чужое месторождение «тронуто» (запасы меньше начальных) — оно должно остаться лёгким.
-    const touched = old.map.reserve.findIndex((r: number, i: number) => r > 0 && s.map.grade[i] === 1);
+    const touched = old.map.reserve.findIndex((r: number, i: number) => r > 0 && s.map.grade[i] === 1 && s.map.region[i] === 0);
     old.map.reserve[touched] -= 1;
+    legacyMap(old);
     const m = deserialize(JSON.stringify(old))!;
     expect(m.version).toBe(SAVE_VERSION);
     expect(m.cash).toBe(12345);

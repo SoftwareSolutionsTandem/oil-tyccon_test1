@@ -33,6 +33,7 @@ import {
   type GameState,
 } from '../src/core';
 import { Rng } from '../src/core/rng';
+import { legacyMap } from './legacy';
 
 const HX = HQ_POS.x;
 const HY = HQ_POS.y;
@@ -506,6 +507,7 @@ describe('НПЗ: продажа продуктов, действия, сохр�
     delete old.stats.current.refined;
     delete old.stats.current.productRevenue;
     old.unlocked = ['pumpjack', 'tank', 'terminal'];
+    legacyMap(old);
     const m = deserialize(JSON.stringify(old))!;
     expect(m.version).toBe(SAVE_VERSION);
     expect(m.cash).toBe(12345);

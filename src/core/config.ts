@@ -3,10 +3,17 @@ import type { BuildableType, TechId } from './types';
 /** Шаг симуляции в секундах игрового времени. */
 export const TICK = 0.1;
 
-export const MAP_SIZE = 40;
+/**
+ * Карта 56×56 (веха 0.5, Временно): старая карта 40×40 (регион 0, «Степь») лежит в углу со смещением MAP_OFFSET,
+ * пустыня — полоса на востоке, шельф — полоса на юге (вместе с юго-восточным углом).
+ */
+export const MAP_SIZE = 56;
 export const PARCEL_SIZE = 8;
 export const PARCELS_PER_SIDE = MAP_SIZE / PARCEL_SIZE;
-export const START_PARCEL = { px: 2, py: 2 };
+/** Размер карты до вехи 0.5 (регион 0) и её смещение на большой карте; смещение кратно PARCEL_SIZE. */
+export const BASE_MAP_SIZE = 40;
+export const MAP_OFFSET = { x: 0, y: 0 };
+export const START_PARCEL = { px: MAP_OFFSET.x / PARCEL_SIZE + 2, py: MAP_OFFSET.y / PARCEL_SIZE + 2 };
 /** Клетка конторы внутри стартового участка. */
 export const HQ_POS = { x: START_PARCEL.px * PARCEL_SIZE + 1, y: START_PARCEL.py * PARCEL_SIZE + 1 };
 
@@ -286,6 +293,33 @@ export const PIPE_REFUND = 0.5;
 
 export const PARCEL_BASE_PRICE = 3000;
 export const PARCEL_PRICE_GROWTH = 1.7;
+
+export interface RegionSpec {
+  name: string;
+  /** Возможность компании, которая открывает покупку земли региона (у региона 0 — нет). */
+  feature: 'desert' | 'shelf' | null;
+  /** Цена участка: parcelBase · parcelGrowth^(k − freeParcels), k — число своих участков региона. */
+  parcelBase: number;
+  parcelGrowth: number;
+  /** Бесплатные участки региона (стартовый у региона 0): цена первого купленного — parcelBase. */
+  freeParcels: number;
+  /** Множитель содержания качалок региона. */
+  pumpUpkeep: number;
+  /** Генерация: условная удалённость (как у участков региона 0), доля участков без месторождений, множитель запасов, доля тяжёлых месторождений. */
+  remoteness: number;
+  emptyChance: number;
+  reserveFactor: number;
+  heavyChance: number;
+}
+
+/**
+ * Регионы (веха 0.5, docs/M05_DESIGN.md §2.1). Регион 0 — прежняя карта с прежними числами. Числа новых регионов — «Временно».
+ */
+export const REGIONS: readonly RegionSpec[] = [
+  { name: 'Степь', feature: null, parcelBase: PARCEL_BASE_PRICE, parcelGrowth: PARCEL_PRICE_GROWTH, freeParcels: 1, pumpUpkeep: 1, remoteness: 0, emptyChance: 0.35, reserveFactor: 1, heavyChance: 0 },
+  { name: 'Пустыня', feature: 'desert', parcelBase: 15000, parcelGrowth: 1.5, freeParcels: 0, pumpUpkeep: 1.3, remoteness: 3, emptyChance: 0.1, reserveFactor: 1.5, heavyChance: 0.85 },
+  { name: 'Шельф', feature: 'shelf', parcelBase: 40000, parcelGrowth: 1.5, freeParcels: 0, pumpUpkeep: 1, remoteness: 3, emptyChance: 0.35, reserveFactor: 1, heavyChance: 0 },
+];
 
 /**
  * Разведка чужих участков. Уровни: 0 — ничего не известно, 1 — геологическая съёмка, 2 — сейсморазведка;

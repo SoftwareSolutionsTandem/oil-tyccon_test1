@@ -10,14 +10,14 @@ import {
   REFINERY,
   MOTHBALL_UPKEEP,
   MARKET,
-  PARCEL_BASE_PRICE,
-  PARCEL_PRICE_GROWTH,
+  REGIONS,
+  START_PARCEL,
   STATS_WINDOW,
   TECHS,
   LOANS,
 } from './config';
 import type { BuildableType, Building, GameState, Grade, LoanState, StatBucket, TechId } from './types';
-import { ownedParcelCount, tileIndex } from './world';
+import { ownedParcelsInRegion, parcelRegion, tileIndex } from './world';
 
 export function levelSpec(b: Building) {
   if (b.type === 'hq') return { cost: 0, upkeep: 0, value: HQ_STORAGE };
@@ -298,7 +298,7 @@ export function terminalThroughput(s: GameState): number {
  * без s — базовое содержание уровня (для справочных расчётов, где компании нет).
  */
 export function buildingUpkeep(b: Building, s?: GameState): number {
-  const upkeep = levelSpec(b).upkeep * (s ? upkeepFactor(s) : 1);
+  const upkeep = levelSpec(b).upkeep * (s ? upkeepFactor(s) * regionUpkeepFactor(s, b) : 1);
   return b.enabled ? upkeep : upkeep * MOTHBALL_UPKEEP;
 }
 
@@ -306,8 +306,21 @@ export function totalUpkeep(s: GameState): number {
   return s.buildings.reduce((sum, b) => sum + buildingUpkeep(b, s), 0);
 }
 
-export function parcelPrice(s: GameState): number {
-  return Math.round(PARCEL_BASE_PRICE * Math.pow(PARCEL_PRICE_GROWTH, ownedParcelCount(s) - 1));
+/** Множитель содержания здания от региона его клетки (веха 0.5): у качалок пустыни — REGIONS[1].pumpUpkeep. */
+export function regionUpkeepFactor(s: GameState, b: Building): number {
+  if (b.type !== 'pumpjack') return 1;
+  return REGIONS[s.map.region?.[tileIndex(s, b.x, b.y)] ?? 0]?.pumpUpkeep ?? 1;
+}
+
+/**
+ * Цена участка (px, py): base_r · g_r^(k_r − free_r), k_r — число своих участков региона r, free_r — бесплатные
+ * участки региона (стартовый у степи). Для степи это прежняя формула 3000 · 1,7^(k − 1). Без участка — цена
+ * следующего участка степи.
+ */
+export function parcelPrice(s: GameState, px = START_PARCEL.px, py = START_PARCEL.py): number {
+  const r = parcelRegion(px, py);
+  const spec = REGIONS[r];
+  return Math.round(spec.parcelBase * Math.pow(spec.parcelGrowth, ownedParcelsInRegion(s, r) - spec.freeParcels));
 }
 
 export function emptyBucket(): StatBucket {

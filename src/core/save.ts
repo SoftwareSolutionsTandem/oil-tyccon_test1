@@ -1,11 +1,14 @@
 import { planAutoConnect } from './actions';
 import { bestConnect } from './connect';
 import { levelSpec } from './economy';
-import { PARCEL_SIZE, SURVEY_EXACT, TECH_IDS, TECHS } from './config';
+import { BASE_MAP_SIZE, MAP_OFFSET, PARCEL_SIZE, PARCELS_PER_SIDE, SURVEY_EXACT, TECH_IDS, TECHS } from './config';
 import { syncOil } from './network';
-import { isParcelOwned } from './world';
+import { isParcelOwned, parcelRegion } from './world';
 import { createNewGame, SAVE_VERSION } from './state';
-import type { GameState } from './types';
+import type { Feature, GameState } from './types';
+
+/** Известные возможности компании (проверка сохранений). */
+const FEATURES: readonly Feature[] = ['research', 'loans', 'managers', 'desert', 'shelf'];
 
 export const SAVE_KEY = 'oil-tycoon-save';
 
@@ -29,11 +32,23 @@ export function deserialize(json: string): GameState | null {
     typeof s.cash !== 'number' ||
     !Array.isArray(s.buildings) ||
     !isRecord(s.map) ||
-    !Array.isArray(s.map.reserve) ||
-    s.map.reserve.length !== reference.map.reserve.length
+    !Array.isArray(s.map.reserve)
   ) {
     return null;
   }
+  // v7 → v8: карта 40×40 ложится в угол карты 56×56 — до остальных миграций, которые сверяют длины массивов с новой игрой.
+  if (s.version < 8) {
+    if (!expandMap(s, reference)) return null;
+  } else if (
+    s.map.size !== reference.map.size ||
+    !Array.isArray(s.map.region) ||
+    s.map.region.length !== reference.map.region.length ||
+    !Array.isArray(s.map.owned) ||
+    s.map.owned.length !== reference.map.owned.length
+  ) {
+    return null;
+  }
+  if (s.map.reserve.length !== reference.map.reserve.length) return null;
   const state: GameState = { ...reference, ...s };
   // Сорта не зависят от труб, а подключение при миграции v1 уже считает поток с сортами — поэтому сначала сорта.
   if (s.version < 3) migrateV2(state, reference);
@@ -49,10 +64,53 @@ export function deserialize(json: string): GameState | null {
   if (s.version < 7) migrateV6(state);
   else if (!validCompany(state)) return null;
   // v3 → v4: разведка. Старые игры видели запасы всех участков бесплатно — это знание сохраняется («известно точно»).
-  if (s.version < 4) state.map = { ...state.map, survey: state.map.owned.map(() => SURVEY_EXACT) };
+  // Участки новых регионов (веха 0.5) старые игры не видели — они не разведаны.
+  if (s.version < 4) state.map = { ...state.map, survey: state.map.owned.map((_, i) => (parcelRegion(i % PARCELS_PER_SIDE, Math.floor(i / PARCELS_PER_SIDE)) === 0 ? SURVEY_EXACT : 0)) };
   else if (!Array.isArray(state.map.survey) || state.map.survey.length !== reference.map.survey.length) return null;
   state.version = SAVE_VERSION;
   return state;
+}
+
+/**
+ * v7 → v8: регионы (веха 0.5). Карта 40×40 копируется в карту 56×56 со смещением MAP_OFFSET; клетки и участки
+ * новых регионов — как в новой игре с тем же seed (их не было, поэтому они нетронуты). Земля, трубы, разведка и
+ * здания не меняются (смещение — константа; здания сдвигаются на него же). Нумерация целей не сдвигается: цель
+ * региона добавлена в конец цепочки. Массивы, которых в старой версии ещё нет (трубы v1, сорта v2, разведка v3),
+ * создают следующие миграции уже в размере новой карты.
+ */
+function expandMap(s: GameState, reference: GameState): boolean {
+  const old = s.map as unknown as Record<string, unknown>;
+  const n0 = BASE_MAP_SIZE;
+  const n = reference.map.size;
+  const p0 = BASE_MAP_SIZE / PARCEL_SIZE;
+  const ox = MAP_OFFSET.x;
+  const oy = MAP_OFFSET.y;
+  if (!Array.isArray(old.reserve) || old.reserve.length !== n0 * n0) return false;
+  if (!Array.isArray(old.owned) || old.owned.length !== p0 * p0) return false;
+  const map = { ...s.map, size: n, region: [...reference.map.region] } as GameState['map'];
+  for (const key of ['reserve', 'initial', 'decor', 'pipes', 'grade'] as const) {
+    const src = old[key];
+    if (src === undefined) continue;
+    if (!Array.isArray(src) || src.length !== n0 * n0) return false;
+    const out = key === 'pipes' ? new Array<number>(n * n).fill(0) : [...reference.map[key]];
+    for (let y = 0; y < n0; y++) for (let x = 0; x < n0; x++) out[(y + oy) * n + x + ox] = src[y * n0 + x];
+    map[key] = out;
+  }
+  for (const key of ['owned', 'survey'] as const) {
+    const src = old[key];
+    if (src === undefined) continue;
+    if (!Array.isArray(src) || src.length !== p0 * p0) return false;
+    const out: Array<boolean | number> = key === 'owned' ? new Array<boolean>(PARCELS_PER_SIDE ** 2).fill(false) : new Array<number>(PARCELS_PER_SIDE ** 2).fill(0);
+    for (let py = 0; py < p0; py++)
+      for (let px = 0; px < p0; px++) out[(py + oy / PARCEL_SIZE) * PARCELS_PER_SIDE + px + ox / PARCEL_SIZE] = src[py * p0 + px];
+    (map as unknown as Record<string, unknown>)[key] = out;
+  }
+  s.map = map;
+  for (const b of s.buildings) {
+    b.x += ox;
+    b.y += oy;
+  }
+  return true;
 }
 
 /** Индекс цели «Переработка» в цепочке v5 (в v6 перед ней вставлен «Инженерный центр»). */
@@ -130,7 +188,7 @@ function validCompany(s: GameState): boolean {
 function validResearch(s: GameState): boolean {
   if (typeof s.totals.research !== 'number') s.totals = { ...s.totals, research: 0 };
   if (!Number.isFinite(s.totals.research) || s.totals.research < 0) return false;
-  if (!Array.isArray(s.features) || s.features.some((f) => f !== 'research' && f !== 'loans' && f !== 'managers')) return false;
+  if (!Array.isArray(s.features) || s.features.some((f) => !FEATURES.includes(f))) return false;
   const r = s.research as unknown;
   if (!isRecord(r) || !isRecord(r.levels)) return false;
   for (const [id, lvl] of Object.entries(r.levels)) {

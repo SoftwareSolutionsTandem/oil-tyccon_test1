@@ -8,6 +8,7 @@ import {
   parcelPrice,
   parcelSurvey,
   PARCELS_PER_SIDE,
+  parcelRegion,
   serialize,
   START_PARCEL,
   survey,
@@ -17,6 +18,7 @@ import {
   SURVEY_LEVELS,
   type GameState,
 } from '../src/core';
+import { legacyMap } from './legacy';
 
 const N = { px: START_PARCEL.px + 1, py: START_PARCEL.py };
 
@@ -114,7 +116,10 @@ describe('разведка', () => {
     const old = JSON.parse(serialize(createNewGame(3)));
     old.version = 3;
     delete old.map.survey;
+    legacyMap(old);
     const m = deserialize(JSON.stringify(old))!;
-    for (let py = 0; py < PARCELS_PER_SIDE; py++) for (let px = 0; px < PARCELS_PER_SIDE; px++) expect(surveyLevel(m, px, py)).toBe(SURVEY_EXACT);
+    // Участки новых регионов (v8) старые игры не видели — не разведаны.
+    for (let py = 0; py < PARCELS_PER_SIDE; py++)
+      for (let px = 0; px < PARCELS_PER_SIDE; px++) expect(surveyLevel(m, px, py)).toBe(parcelRegion(px, py) === 0 ? SURVEY_EXACT : 0);
   });
 });
