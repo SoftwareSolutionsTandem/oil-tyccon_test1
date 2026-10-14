@@ -1,9 +1,9 @@
-import { MARKET, OFFLINE_CAP } from './config';
+import { MARKET, OFFLINE_CAP, RESEARCH_EPS } from './config';
 import { advanceStats, buildingUpkeep, recordStat } from './economy';
 import { stepLogistics } from './network';
 import { checkObjectives, type Objective } from './objectives';
 import { Rng } from './rng';
-import type { GameState, Totals } from './types';
+import type { GameState, TechId, Totals } from './types';
 
 export interface TickEvents {
   autoSold: number;
@@ -15,12 +15,16 @@ export interface TickEvents {
   refinedByGrade: [number, number];
   refinedValue: number;
   productRevenue: number;
+  /** Завершённые на этом шаге исследования: технология и достигнутый уровень. */
+  researched: Array<{ id: TechId; level: number }>;
 }
 
 /** Один шаг симуляции. Чистая логика без DOM — её можно гонять в тестах и офлайн. */
 export function tick(s: GameState, dt: number): TickEvents {
   s.time += dt;
   updateMarket(s, dt);
+  // Исследование завершается в начале шага: эффект действует уже в логистике и содержании этого шага.
+  const researched = advanceResearch(s, dt);
 
   // 1–2. Логистика: добыча через сеть трубопроводов в хранилища своей сети и продажа через терминалы этой сети (по цене сорта).
   const flow = stepLogistics(s, dt);
@@ -46,7 +50,7 @@ export function tick(s: GameState, dt: number): TickEvents {
 
   // 3. Содержание зданий.
   let upkeep = 0;
-  for (const b of s.buildings) upkeep += buildingUpkeep(b);
+  for (const b of s.buildings) upkeep += buildingUpkeep(b, s);
   const expenses = upkeep * dt;
   s.cash -= expenses;
   s.totals.expenses += expenses;
@@ -62,7 +66,23 @@ export function tick(s: GameState, dt: number): TickEvents {
     refinedByGrade: flow.refinedByGrade,
     refinedValue: flow.refinedValue,
     productRevenue: flow.productRevenue,
+    researched,
   };
+}
+
+/**
+ * Ход исследования: остаток уменьшается на dt; на шаге, где он стал не больше RESEARCH_EPS, уровень растёт на 1.
+ * Допуск нужен, чтобы сумма шагов 0,1 с завершала исследование в ту же секунду, что и шаги по 1 с (офлайн).
+ */
+function advanceResearch(s: GameState, dt: number): Array<{ id: TechId; level: number }> {
+  const a = s.research.active;
+  if (!a) return [];
+  a.remaining -= dt;
+  if (a.remaining > RESEARCH_EPS) return [];
+  const level = (s.research.levels[a.id] ?? 0) + 1;
+  s.research.levels[a.id] = level;
+  s.research.active = null;
+  return [{ id: a.id, level }];
 }
 
 function updateMarket(s: GameState, dt: number): void {
@@ -91,6 +111,8 @@ export interface OfflineReport {
   refined: number;
   productRevenue: number;
   completed: Objective[];
+  /** Исследования, завершённые за время отсутствия. */
+  researched: Array<{ id: TechId; level: number }>;
 }
 
 /** Догоняет время, прошедшее без игрока (с ограничением OFFLINE_CAP), крупными шагами по 1 с. */
@@ -98,7 +120,12 @@ export function simulateOffline(s: GameState, seconds: number): OfflineReport {
   const total = Math.min(Math.max(0, Math.floor(seconds)), OFFLINE_CAP);
   const before: Totals = { ...s.totals };
   const completed: Objective[] = [];
-  for (let i = 0; i < total; i++) completed.push(...tick(s, 1).completed);
+  const researched: OfflineReport['researched'] = [];
+  for (let i = 0; i < total; i++) {
+    const ev = tick(s, 1);
+    completed.push(...ev.completed);
+    researched.push(...ev.researched);
+  }
   return {
     seconds: total,
     produced: s.totals.produced - before.produced,
@@ -108,5 +135,6 @@ export function simulateOffline(s: GameState, seconds: number): OfflineReport {
     refined: s.totals.refined - before.refined,
     productRevenue: s.totals.productRevenue - before.productRevenue,
     completed,
+    researched,
   };
 }

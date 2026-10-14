@@ -1,4 +1,4 @@
-import type { BuildableType } from './types';
+import type { BuildableType, TechId } from './types';
 
 /** Шаг симуляции в секундах игрового времени. */
 export const TICK = 0.1;
@@ -152,6 +152,75 @@ export const PRODUCTS = {
 };
 
 export const HQ_NAME = 'Контора';
+
+export interface TechLevel {
+  /** Цена исследования уровня, $. */
+  cost: number;
+  /** Длительность исследования, с игрового времени. */
+  time: number;
+}
+
+export interface TechSpec {
+  name: string;
+  description: string;
+  /** Эффект за уровень (доля): смысл — у каждой технологии свой, см. economy.ts. */
+  step: number;
+  levels: TechLevel[];
+}
+
+/**
+ * Технологии (веха 0.4, docs/M04_DESIGN.md §4.3). Числа — «Временно», настраиваются баланс-прогонами.
+ * yield — добыча качалок ×(1 + step·k); eor — порог истощения DEPLETION_MIN_FACTOR + step·k;
+ * energy — содержание всех зданий ×(1 − step·k); standard — цена новой качалки ×(1 − step·k).
+ */
+export const TECHS: Record<TechId, TechSpec> = {
+  yield: {
+    name: 'Оптимизация режимов',
+    description: 'Подбор режимов работы станков: добыча всех качалок выше.',
+    step: 0.08,
+    levels: [
+      { cost: 40000, time: 120 },
+      { cost: 80000, time: 180 },
+      { cost: 160000, time: 240 },
+    ],
+  },
+  eor: {
+    name: 'Методы увеличения нефтеотдачи',
+    description: 'Истощённые зоны отдают больше: выше нижний предел добычи по мере истощения.',
+    step: 0.05,
+    levels: [
+      { cost: 60000, time: 180 },
+      { cost: 120000, time: 240 },
+      { cost: 240000, time: 300 },
+    ],
+  },
+  energy: {
+    name: 'Энергосбережение',
+    description: 'Содержание всех зданий ниже, в том числе законсервированных.',
+    step: 0.07,
+    levels: [
+      { cost: 30000, time: 120 },
+      { cost: 60000, time: 180 },
+      { cost: 120000, time: 240 },
+    ],
+  },
+  standard: {
+    name: 'Типовой проект станка',
+    description: 'Новые качалки дешевле. Цена уже построенных и компенсация при сносе не меняются.',
+    step: 0.1,
+    levels: [
+      { cost: 50000, time: 120 },
+      { cost: 100000, time: 180 },
+      { cost: 200000, time: 240 },
+    ],
+  },
+};
+
+/** Допуск завершения исследования, с: накопленная ошибка суммы шагов не откладывает завершение на шаг. */
+export const RESEARCH_EPS = 1e-6;
+
+/** Порядок технологий в интерфейсе и при проверке сохранений. */
+export const TECH_IDS: readonly TechId[] = ['yield', 'eor', 'energy', 'standard'];
 
 /**
  * Сорта нефти. Лёгкая продаётся по рыночной цене. Тяжёлая — со скидкой, которая меняется по своему циклу

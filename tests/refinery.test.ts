@@ -512,7 +512,8 @@ describe('НПЗ: продажа продуктов, действия, сохр�
     expect(m.productThresholds).toEqual([0, 0, 0]);
     expect(m.totals.refined).toBe(0);
     expect(m.totals.productsSold).toEqual([0, 0, 0]);
-    expect(m.objectiveIndex).toBe(11);
+    // v4 → v5 сдвигает на одну («Переработка»), v5 → v6 — ещё на одну («Инженерный центр»).
+    expect(m.objectiveIndex).toBe(12);
     expect(OBJECTIVES[m.objectiveIndex].id).toBe('cash_500k');
     expect(m.unlocked).toContain('refinery');
     // Раньше «Стабильной прибыли» — номер и открытые здания не меняются.
@@ -524,8 +525,10 @@ describe('НПЗ: продажа продуктов, действия, сохр�
 
   it('цель «Переработка» открывается «Стабильной прибылью» и даёт награду', () => {
     const i = OBJECTIVES.findIndex((o) => o.id === 'refining');
-    expect(OBJECTIVES[i - 1].id).toBe('profit_6k');
-    expect(OBJECTIVES[i - 1].unlocks).toContain('refinery');
+    // С v6 между ними — «Инженерный центр».
+    const p = OBJECTIVES.findIndex((o) => o.id === 'profit_6k');
+    expect(p).toBeLessThan(i);
+    expect(OBJECTIVES[p].unlocks).toContain('refinery');
     expect(OBJECTIVES[i].reward).toBe(5000);
     expect(START_CASH).toBeGreaterThan(0);
     expect(gradePrice(createNewGame(1), 0)).toBeGreaterThan(0);

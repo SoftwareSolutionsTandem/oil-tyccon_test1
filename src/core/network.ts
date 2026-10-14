@@ -1,5 +1,5 @@
-import { DEPLETION_MIN_FACTOR, PIPES, REFINERY } from './config';
-import { drainageTiles, gradePrice, levelSpec, nominalRate, productPrice, pumpGrade, refineryMargin, refineryProductCap, refineryShip } from './economy';
+import { PIPES, REFINERY } from './config';
+import { depletionFloor, drainageTiles, gradePrice, levelSpec, nominalRate, productPrice, pumpGrade, refineryMargin, refineryProductCap, refineryShip } from './economy';
 import type { Building, GameState, Grade } from './types';
 
 /**
@@ -321,7 +321,8 @@ export function lastFlow(s: GameState): FlowInfo | undefined {
 /** То же, что pumpRate, но по уже посчитанной зоне (без повторного обхода зданий). */
 function rateOf(s: GameState, b: Building, reserve: number, initial: number): number {
   if (initial <= 0 || reserve <= 0) return 0;
-  return nominalRate(s, b) * (DEPLETION_MIN_FACTOR + (1 - DEPLETION_MIN_FACTOR) * (reserve / initial));
+  const m = depletionFloor(s);
+  return nominalRate(s, b) * (m + (1 - m) * (reserve / initial));
 }
 
 const free = (b: Building) => Math.max(0, levelSpec(b).value - (b.stored ?? 0));

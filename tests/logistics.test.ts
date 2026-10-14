@@ -69,7 +69,7 @@ function expectOilConserved(s: GameState) {
 
 function expectBalanced(s: GameState, start: number) {
   const t = s.totals;
-  expect(s.cash).toBeCloseTo(start + t.revenue + t.rewards + t.refunds - t.expenses - t.capex, 6);
+  expect(s.cash).toBeCloseTo(start + t.revenue + t.rewards + t.refunds - t.expenses - t.capex - t.research, 6);
 }
 
 const HX = HQ_POS.x;

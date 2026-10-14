@@ -9,11 +9,13 @@ import {
   PRODUCTS,
   REFINERY,
   MOTHBALL_UPKEEP,
+  MARKET,
   PARCEL_BASE_PRICE,
   PARCEL_PRICE_GROWTH,
   STATS_WINDOW,
+  TECHS,
 } from './config';
-import type { BuildableType, Building, GameState, Grade, StatBucket } from './types';
+import type { BuildableType, Building, GameState, Grade, StatBucket, TechId } from './types';
 import { ownedParcelCount, tileIndex } from './world';
 
 export function levelSpec(b: Building) {
@@ -31,7 +33,68 @@ export function countOf(s: GameState, type: Building['type']): number {
 
 export function buildCost(s: GameState, type: BuildableType): number {
   const spec = BUILDINGS[type];
-  return Math.round(spec.levels[0].cost * Math.pow(spec.costGrowth, countOf(s, type)));
+  // «Типовой проект станка» удешевляет только новые качалки; вложенное в построенные (invested) не меняется.
+  const discount = type === 'pumpjack' ? 1 - TECHS.standard.step * techLevel(s, 'standard') : 1;
+  return Math.round(spec.levels[0].cost * Math.pow(spec.costGrowth, countOf(s, type)) * discount);
+}
+
+// ——— Технологии (веха 0.4) ———
+
+/** Достигнутый уровень технологии (0 — не исследована). */
+export function techLevel(s: GameState, id: TechId): number {
+  return s.research?.levels[id] ?? 0;
+}
+
+/** Нижний предел добычи при истощении: DEPLETION_MIN_FACTOR, поднятый технологией «нефтеотдача». */
+export function depletionFloor(s: GameState): number {
+  return DEPLETION_MIN_FACTOR + TECHS.eor.step * techLevel(s, 'eor');
+}
+
+/** Цена следующего уровня технологии или null, если уровень максимальный. */
+export function techNextLevel(s: GameState, id: TechId): { level: number; cost: number; time: number } | null {
+  const k = techLevel(s, id);
+  const spec = TECHS[id].levels[k];
+  return spec ? { level: k + 1, ...spec } : null;
+}
+
+/** Опорная цена сорта для оценок окупаемости: средняя цена рынка и средняя скидка тяжёлой (без колебаний). */
+export function referencePrice(g: Grade): number {
+  return g === 1 ? MARKET.mean * (1 - HEAVY_SPREAD.mean) : MARKET.mean;
+}
+
+/**
+ * Оценка эффекта следующего уровня технологии для текущего предприятия (для интерфейса и бота):
+ * прирост добычи, барр./с; экономия содержания, $/с; прирост операционной прибыли, $/с, по опорным ценам;
+ * для «типового проекта» — экономия на следующей качалке, $. Ограничения труб и сбыта не учитываются.
+ */
+export function techEffect(s: GameState, id: TechId): { rate: number; upkeep: number; profit: number; pumpSaving: number } {
+  const k = techLevel(s, id);
+  const step = TECHS[id].step;
+  let rate = 0;
+  let value = 0;
+  let upkeep = 0;
+  let pumpSaving = 0;
+  if (id === 'yield' || id === 'eor') {
+    const m = depletionFloor(s);
+    for (const b of s.buildings) {
+      if (b.type !== 'pumpjack' || !b.enabled) continue;
+      const pool = drainagePool(s, b);
+      if (pool.initial <= 0 || pool.reserve <= 0) continue;
+      const x = pool.reserve / pool.initial;
+      const now = nominalRate(s, b) * (m + (1 - m) * x);
+      // yield: номинал ×(1 + step(k+1))/(1 + step·k); eor: предел m → m + step.
+      const next = id === 'yield' ? (now * (1 + step * (k + 1))) / (1 + step * k) : nominalRate(s, b) * (m + step + (1 - m - step) * x);
+      rate += next - now;
+      value += (next - now) * referencePrice(pumpGrade(s, b));
+    }
+  } else if (id === 'energy') {
+    // Содержание без технологии ×step — столько экономит следующий уровень.
+    upkeep = (totalUpkeep(s) / (1 - step * k)) * step;
+  } else {
+    const base = BUILDINGS.pumpjack.levels[0].cost * Math.pow(BUILDINGS.pumpjack.costGrowth, countOf(s, 'pumpjack'));
+    pumpSaving = base * step;
+  }
+  return { rate, upkeep, profit: value + upkeep, pumpSaving };
 }
 
 /** Стоимость улучшения до следующего уровня или null, если уровень максимальный. */
@@ -93,8 +156,8 @@ export function drainagePool(s: GameState, b: Building): { reserve: number; init
 export function pumpRate(s: GameState, b: Building): number {
   const pool = drainagePool(s, b);
   if (pool.initial <= 0 || pool.reserve <= 0) return 0;
-  const factor = DEPLETION_MIN_FACTOR + (1 - DEPLETION_MIN_FACTOR) * (pool.reserve / pool.initial);
-  return nominalRate(s, b) * factor;
+  const m = depletionFloor(s);
+  return nominalRate(s, b) * (m + (1 - m) * (pool.reserve / pool.initial));
 }
 
 /** Сорт нефти, которую добывает качалка: сорт месторождения её клетки (зона дренирования одного сорта). */
@@ -102,10 +165,14 @@ export function pumpGrade(s: GameState, b: Building): Grade {
   return (s.map.grade[tileIndex(s, b.x, b.y)] ?? 0) as Grade;
 }
 
-/** Номинальная добыча качалки с учётом сорта: старые станки 1-го уровня медленнее тянут тяжёлую нефть. */
+/**
+ * Номинальная добыча качалки с учётом сорта (старые станки 1-го уровня медленнее тянут тяжёлую нефть)
+ * и технологии «оптимизация режимов» (множитель после поправки на сорт).
+ */
 export function nominalRate(s: GameState, b: Building): number {
   const v = levelSpec(b).value;
-  return b.level === 1 ? v * GRADES[pumpGrade(s, b)].level1Rate : v;
+  const graded = b.level === 1 ? v * GRADES[pumpGrade(s, b)].level1Rate : v;
+  return graded * (1 + TECHS.yield.step * techLevel(s, 'yield'));
 }
 
 /**
@@ -190,7 +257,7 @@ export function oilByGrade(s: GameState): [number, number] {
 export function timeToDeplete(s: GameState, b: Building): number {
   const { reserve: r, initial: R } = drainagePool(s, b);
   if (R <= 0 || r <= 0) return 0;
-  const m = DEPLETION_MIN_FACTOR;
+  const m = depletionFloor(s);
   const v = nominalRate(s, b);
   return (R / (v * (1 - m))) * Math.log(1 + ((1 - m) * r) / (m * R));
 }
@@ -212,13 +279,17 @@ export function terminalThroughput(s: GameState): number {
   return total;
 }
 
-export function buildingUpkeep(b: Building): number {
-  const upkeep = levelSpec(b).upkeep;
+/**
+ * Содержание здания, $/с. С состоянием s учитывается «энергосбережение» (и для законсервированных зданий);
+ * без s — базовое содержание уровня (для справочных расчётов, где компании нет).
+ */
+export function buildingUpkeep(b: Building, s?: GameState): number {
+  const upkeep = levelSpec(b).upkeep * (s ? 1 - TECHS.energy.step * techLevel(s, 'energy') : 1);
   return b.enabled ? upkeep : upkeep * MOTHBALL_UPKEEP;
 }
 
 export function totalUpkeep(s: GameState): number {
-  return s.buildings.reduce((sum, b) => sum + buildingUpkeep(b), 0);
+  return s.buildings.reduce((sum, b) => sum + buildingUpkeep(b, s), 0);
 }
 
 export function parcelPrice(s: GameState): number {

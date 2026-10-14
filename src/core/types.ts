@@ -48,6 +48,19 @@ export interface Building {
   marginOnly?: boolean;
 }
 
+/** Возможности компании, которые открываются целями (не здания): исследования, кредиты, менеджеры (веха 0.4). */
+export type Feature = 'research' | 'loans' | 'managers';
+
+/** Технологии (веха 0.4, docs/M04_DESIGN.md §4): добыча, нефтеотдача, энергосбережение, типовой проект станка. */
+export type TechId = 'yield' | 'eor' | 'energy' | 'standard';
+
+/** Исследования: достигнутые уровни и текущее исследование (одно за раз, отмены нет). */
+export interface ResearchState {
+  levels: Partial<Record<TechId, number>>;
+  /** remaining — сколько секунд игрового времени осталось до завершения. */
+  active: { id: TechId; remaining: number } | null;
+}
+
 /** Фильтр сырья НПЗ. */
 export type Feed = 'any' | 'light' | 'heavy';
 
@@ -107,6 +120,8 @@ export interface Totals {
   productsSold: [number, number, number];
   /** Выручка от нефтепродуктов (часть revenue). */
   productRevenue: number;
+  /** Деньги, потраченные на исследования (не входят в capex: не возвращаются при сносе). */
+  research: number;
 }
 
 export interface GameState {
@@ -133,6 +148,9 @@ export interface GameState {
   /** Минимальные цены продажи нефтепродуктов [бензин, дизель, мазут] — общие для всех НПЗ компании. */
   productThresholds: [number, number, number];
   unlocked: BuildableType[];
+  /** Открытые возможности компании (не здания). */
+  features: Feature[];
+  research: ResearchState;
   /** Индекс текущей цели в списке OBJECTIVES. */
   objectiveIndex: number;
   totals: Totals;

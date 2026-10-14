@@ -1,5 +1,5 @@
 import { countOf, lastMinute } from './economy';
-import type { BuildableType, GameState } from './types';
+import type { BuildableType, Feature, GameState } from './types';
 import { isConnected } from './network';
 import { ownedParcelCount } from './world';
 
@@ -9,6 +9,8 @@ export interface Objective {
   description: string;
   reward: number;
   unlocks?: BuildableType[];
+  /** Открываемые возможности компании (не здания). */
+  features?: Feature[];
   progress: (s: GameState) => { current: number; target: number };
 }
 
@@ -94,6 +96,14 @@ export const OBJECTIVES: Objective[] = [
     },
   },
   {
+    id: 'engineering',
+    title: 'Инженерный центр',
+    description: 'Выйдите на добычу 600 баррелей в минуту. Откроются исследования: технологии усиливают весь промысел сразу.',
+    reward: 3000,
+    features: ['research'],
+    progress: (s) => ({ current: lastMinute(s).produced, target: 600 }),
+  },
+  {
     id: 'refining',
     title: 'Переработка',
     description: 'Постройте НПЗ (6) и продайте 200 баррелей нефтепродуктов. Сравнивайте в панели НПЗ: продать нефть или переработать.',
@@ -122,6 +132,7 @@ export function checkObjectives(s: GameState): Objective[] {
     s.cash += obj.reward;
     s.totals.rewards += obj.reward;
     for (const t of obj.unlocks ?? []) if (!s.unlocked.includes(t)) s.unlocked.push(t);
+    for (const f of obj.features ?? []) if (!s.features.includes(f)) s.features.push(f);
     s.objectiveIndex++;
     done.push(obj);
   }

@@ -1,7 +1,7 @@
 import { planAutoConnect } from './actions';
 import { bestConnect } from './connect';
 import { levelSpec } from './economy';
-import { PARCEL_SIZE, SURVEY_EXACT } from './config';
+import { PARCEL_SIZE, SURVEY_EXACT, TECH_IDS, TECHS } from './config';
 import { syncOil } from './network';
 import { isParcelOwned } from './world';
 import { createNewGame, SAVE_VERSION } from './state';
@@ -42,11 +42,61 @@ export function deserialize(json: string): GameState | null {
   else if (!Array.isArray(state.map.pipes) || state.map.pipes.length !== reference.map.pipes.length) return null;
   if (s.version < 5) migrateV4(state, reference);
   else if (!Array.isArray(state.productThresholds) || state.productThresholds.length !== 3) return null;
+  // v5 → v6 — после v4 → v5: обе миграции сдвигают номер цели, каждая по своей цепочке.
+  if (s.version < 6) migrateV5(state);
+  else if (!validResearch(state)) return null;
   // v3 → v4: разведка. Старые игры видели запасы всех участков бесплатно — это знание сохраняется («известно точно»).
   if (s.version < 4) state.map = { ...state.map, survey: state.map.owned.map(() => SURVEY_EXACT) };
   else if (!Array.isArray(state.map.survey) || state.map.survey.length !== reference.map.survey.length) return null;
   state.version = SAVE_VERSION;
   return state;
+}
+
+/** Индекс цели «Переработка» в цепочке v5 (в v6 перед ней вставлен «Инженерный центр»). */
+const REFINING_OBJECTIVE_V5 = 10;
+
+/**
+ * v5 → v6: исследования (веха 0.4). Новые поля — пустые; в цепочку перед «Переработкой» вставлен
+ * «Инженерный центр» (индекс 10).
+ * - objectiveIndex ≤ 10 — без изменений: игрок на «Переработке» (10) сначала проходит новую цель, затем
+ *   «Переработка» засчитывается сразу, если её условие выполнено (награда за неё ещё не выдавалась).
+ * - objectiveIndex ≥ 11 («Переработка» пройдена) — сдвиг на одну; новая цель пропускается без награды,
+ *   исследования открываются, как дала бы она.
+ */
+function migrateV5(s: GameState): void {
+  s.totals = { ...s.totals, research: 0 };
+  s.features = [];
+  s.research = { levels: {}, active: null };
+  if (s.objectiveIndex > REFINING_OBJECTIVE_V5) {
+    s.objectiveIndex += 1;
+    s.features.push('research');
+  }
+}
+
+/**
+ * Проверка полей v6 (В2: поле, которого нет, получает значение по умолчанию; испорченное — сохранение отклоняется).
+ * Уровни — целые от 0 до максимума, только известные технологии; активное исследование — известная технология
+ * не на максимуме, остаток — конечное неотрицательное число.
+ */
+function validResearch(s: GameState): boolean {
+  if (typeof s.totals.research !== 'number') s.totals = { ...s.totals, research: 0 };
+  if (!Number.isFinite(s.totals.research) || s.totals.research < 0) return false;
+  if (!Array.isArray(s.features) || s.features.some((f) => f !== 'research' && f !== 'loans' && f !== 'managers')) return false;
+  const r = s.research as unknown;
+  if (!isRecord(r) || !isRecord(r.levels)) return false;
+  for (const [id, lvl] of Object.entries(r.levels)) {
+    if (!(TECH_IDS as readonly string[]).includes(id)) return false;
+    const max = TECHS[id as keyof typeof TECHS].levels.length;
+    if (typeof lvl !== 'number' || !Number.isInteger(lvl) || lvl < 0 || lvl > max) return false;
+  }
+  if (r.active !== null) {
+    if (!isRecord(r.active)) return false;
+    const { id, remaining } = r.active;
+    if (typeof id !== 'string' || !(TECH_IDS as readonly string[]).includes(id)) return false;
+    if (typeof remaining !== 'number' || !Number.isFinite(remaining) || remaining < 0) return false;
+    if (((r.levels as Record<string, number>)[id] ?? 0) >= TECHS[id as keyof typeof TECHS].levels.length) return false;
+  }
+  return true;
 }
 
 /** Индекс цели «Переработка» в цепочке (вставлена в v5 перед «Нефтяной компанией»). */

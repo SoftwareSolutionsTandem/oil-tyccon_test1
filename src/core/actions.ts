@@ -1,4 +1,4 @@
-import { BUILDINGS, MANUAL_SELL_FACTOR, PARCELS_PER_SIDE, PIPE_REFUND, PIPES, SURVEY_EXACT, SURVEY_LEVELS } from './config';
+import { BUILDINGS, MANUAL_SELL_FACTOR, PARCELS_PER_SIDE, PIPE_REFUND, PIPES, SURVEY_EXACT, SURVEY_LEVELS, TECHS } from './config';
 import {
   buildCost,
   demolishRefund,
@@ -8,10 +8,11 @@ import {
   parcelPrice,
   productPrice,
   recordStat,
+  techNextLevel,
   upgradeCost,
 } from './economy';
 import { componentOf, getNetwork, lastFlow, syncOil } from './network';
-import type { ActionResult, BuildableType, Feed, GameState, Grade } from './types';
+import type { ActionResult, BuildableType, Feed, GameState, Grade, TechId } from './types';
 import {
   buildingAt,
   getBuilding,
@@ -291,6 +292,23 @@ export function survey(s: GameState, px: number, py: number, level: number): Act
   s.cash -= cost;
   s.totals.capex += cost;
   s.map.survey[parcelIndex(px, py)] = level;
+  return OK;
+}
+
+/**
+ * Начать исследование следующего уровня технологии. Отказ, если исследования не открыты, идёт другое,
+ * достигнут максимум или не хватает денег. Деньги списываются сразу (totals.research). Отмены нет.
+ */
+export function startResearch(s: GameState, id: TechId): ActionResult {
+  if (!s.features.includes('research')) return fail('Исследования ещё не открыты — выполняйте цели');
+  if (!TECHS[id]) return fail('Неизвестная технология');
+  if (s.research.active) return fail('Уже идёт исследование — дождитесь его завершения');
+  const next = techNextLevel(s, id);
+  if (!next) return fail('Технология изучена полностью');
+  if (s.cash < next.cost) return fail('Недостаточно денег');
+  s.cash -= next.cost;
+  s.totals.research += next.cost;
+  s.research.active = { id, remaining: next.time };
   return OK;
 }
 
