@@ -85,7 +85,7 @@ function run(s: GameState, seconds: number) {
 /** Деньги всегда объясняются потоками: так экономика остаётся прозрачной для игрока. */
 function expectBalanced(s: GameState, startCash = START_CASH) {
   const t = s.totals;
-  expect(s.cash).toBeCloseTo(startCash + t.revenue + t.rewards + t.refunds - t.expenses - t.capex - t.research, 6);
+  expect(s.cash).toBeCloseTo(startCash + t.revenue + t.rewards + t.refunds + t.borrowed - t.expenses - t.capex - t.research - t.repaid - t.interest, 6);
 }
 
 describe('новая игра', () => {

@@ -36,7 +36,7 @@ const HY = HQ_POS.y;
 /** Денежный инвариант вехи 0.4: исследования — отдельный член. */
 function expectBalanced(s: GameState, start = START_CASH) {
   const t = s.totals;
-  expect(s.cash).toBeCloseTo(start + t.revenue + t.rewards + t.refunds - t.expenses - t.capex - t.research, 6);
+  expect(s.cash).toBeCloseTo(start + t.revenue + t.rewards + t.refunds + t.borrowed - t.expenses - t.capex - t.research - t.repaid - t.interest, 6);
 }
 
 /**
@@ -139,7 +139,7 @@ describe('исследования: эффекты на шаге заверше�
     expect((s.totals.produced - p) / TICK / before).toBeCloseTo(1.08, 5);
   });
 
-  it('eor: порог истощения 0,4 → 0,45 на шаге завершения; добыча не выше номинала при m ≤ 0,55', () => {
+  it('eor: порог истощения поднимается на шаг на шаге завершения; добыча не выше номинала на максимуме', () => {
     const { s, pump } = field(10_000, 40_000); // остаток — четверть
     expect(depletionFloor(s)).toBeCloseTo(0.4, 12);
     expect(startResearch(s, 'eor')).toEqual({ ok: true });
@@ -151,12 +151,14 @@ describe('исследования: эффекты на шаге заверше�
     p = s.totals.produced;
     tick(s, TICK);
     expect(s.research.levels.eor).toBe(1);
-    expect(depletionFloor(s)).toBeCloseTo(0.45, 12);
+    const m1 = 0.4 + TECHS.eor.step;
+    expect(depletionFloor(s)).toBeCloseTo(m1, 12);
     const x = s.map.reserve[pump.y * s.map.size + pump.x] / 40_000;
-    expect(s.totals.produced - p).toBeCloseTo(nom * (0.45 + 0.55 * x) * TICK, 3);
-    // Максимальный уровень: m = 0,55, добыча при любом остатке не больше номинала.
+    expect(s.totals.produced - p).toBeCloseTo(nom * (m1 + (1 - m1) * x) * TICK, 3);
+    // Максимальный уровень: m = 0,4 + 3·шаг < 1, добыча при любом остатке не больше номинала.
     s.research.levels.eor = 3;
-    expect(depletionFloor(s)).toBeCloseTo(0.55, 12);
+    expect(depletionFloor(s)).toBeCloseTo(0.4 + 3 * TECHS.eor.step, 12);
+    expect(depletionFloor(s)).toBeLessThan(1);
     for (const r of [0.001, 10_000, 39_999, 40_000]) {
       s.map.reserve[pump.y * s.map.size + pump.x] = r;
       expect(pumpRate(s, pump)).toBeLessThanOrEqual(nominalRate(s, pump) + 1e-12);
@@ -268,7 +270,8 @@ describe('исследования: офлайн, деньги, ГСЧ', () => {
 describe('исследования: цель и сохранения', () => {
   it('«Инженерный центр» — после «Стабильной прибыли», перед «Переработкой», $3 000, открывает исследования', () => {
     const i = OBJECTIVES.findIndex((o) => o.id === 'engineering');
-    expect(OBJECTIVES[i - 1].id).toBe('profit_6k');
+    // С v7 между ними — «Кредит доверия».
+    expect(OBJECTIVES.findIndex((o) => o.id === 'profit_6k')).toBeLessThan(i);
     expect(OBJECTIVES[i + 1].id).toBe('refining');
     expect(OBJECTIVES[i].reward).toBe(3000);
     const s = createNewGame(2);
@@ -294,7 +297,7 @@ describe('исследования: цель и сохранения', () => {
     return JSON.stringify(old);
   }
 
-  it('миграция v5 → v6 для каждого номера цели 0–12 (v5): сдвиг, открытие, без наград', () => {
+  it('миграция v5 → v6 → v7 для каждого номера цели 0–12 (v5): сдвиг, открытие, без наград', () => {
     for (let v5 = 0; v5 <= 12; v5++) {
       const s = createNewGame(8);
       s.cash = 77_777;
@@ -306,25 +309,26 @@ describe('исследования: цель и сохранения', () => {
       expect(m.totals.rewards).toBe(s.totals.rewards);
       expect(m.totals.research).toBe(0);
       expect(m.research).toEqual({ levels: {}, active: null });
-      const expected = v5 <= 10 ? v5 : v5 + 1;
+      // v5 → v6 вставляет «Инженерный центр» (10), v6 → v7 — «Кредит доверия» (10) и «Штат специалистов» (после «Переработки»).
+      const expected = v5 <= 10 ? v5 : v5 + 3;
       expect(m.objectiveIndex).toBe(expected);
-      expect(m.features).toEqual(v5 >= 11 ? ['research'] : []);
-      // Цель по смыслу та же: до 9 — те же id; 10 — «Инженерный центр», затем «Переработка»; 11 и 12 — прежние.
-      const v5ids = OBJECTIVES.filter((o) => o.id !== 'engineering').map((o) => o.id);
+      expect(m.features).toEqual(v5 >= 11 ? ['research', 'loans', 'managers'] : []);
+      // Цель по смыслу та же: до 9 — те же id; 10 — первая из новых («Кредит доверия»); 11 и 12 — прежние.
+      const v5ids = OBJECTIVES.filter((o) => !['engineering', 'credit', 'staff'].includes(o.id)).map((o) => o.id);
       if (v5 !== 10) expect(OBJECTIVES[m.objectiveIndex]?.id).toBe(v5ids[v5]);
-      else expect(OBJECTIVES[m.objectiveIndex].id).toBe('engineering');
+      else expect(OBJECTIVES[m.objectiveIndex].id).toBe('credit');
     }
   });
 
-  it('миграция: игрок на «Переработке» проходит «Инженерный центр», затем «Переработка» засчитывается сразу', () => {
+  it('миграция: игрок на «Переработке» проходит новые цели, затем «Переработка» засчитывается сразу', () => {
     const s = createNewGame(8);
     s.objectiveIndex = 10; // v5: «Переработка»
     s.totals.productsSold = [150, 50, 0];
     const m = deserialize(asV5(s))!;
     m.stats.current.produced = 600;
     const cash = m.cash;
-    expect(checkObjectives(m).map((o) => o.id)).toEqual(['engineering', 'refining']);
-    expect(m.cash).toBe(cash + 3000 + 5000); // каждая награда — один раз
+    expect(checkObjectives(m).map((o) => o.id)).toEqual(['credit', 'engineering', 'refining']);
+    expect(m.cash).toBe(cash + 2000 + 3000 + 5000); // каждая награда — один раз
     expect(m.features).toContain('research');
   });
 

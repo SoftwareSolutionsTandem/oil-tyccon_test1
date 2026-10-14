@@ -36,6 +36,10 @@ import {
   refineryMargin,
   setProductThreshold,
   startResearch,
+  takeLoan,
+  setManager,
+  LOANS,
+  MANAGERS,
   techEffect,
   techLevel,
   techNextLevel,
@@ -50,9 +54,14 @@ import {
   type TickEvents,
 } from '../src/core';
 
-/** Настройки бота. research: false — исследования не ведутся (базовые прогоны для сравнения с этапом 0). */
+/**
+ * Настройки бота. research / loans / managers: false — механика не используется (базовые прогоны для сравнения).
+ * По умолчанию всё включено.
+ */
 export interface BotOptions {
   research?: boolean;
+  loans?: boolean;
+  managers?: boolean;
 }
 
 /**
@@ -75,7 +84,7 @@ export function runBot(
     minCash = Math.min(minCash, s.cash);
     noteIssues(s);
     if (i % 10 === 0) {
-      decide(s, opts.research ?? true);
+      decide(s, opts);
       recentIssues.delete(s);
     }
   }
@@ -373,7 +382,29 @@ function manageResearch(s: GameState): void {
   else researchGoal.set(s, best.id);
 }
 
-function decide(s: GameState, research = true): void {
+/**
+ * Кредит и персонал (раз в 10 с). Кредит — на весь лимит, если минутная отдача следующей качалки
+ * (прибыль 3-го уровня / её полная цена) выше ставки в 1,5 раза: заём окупается быстрее, чем растут проценты.
+ * Персонал — нанимается, как только открыт и в кассе есть 10 минут зарплаты.
+ */
+function manageCompany(s: GameState, opts: BotOptions): void {
+  if ((opts.loans ?? true) && s.features.includes('loans') && !s.loan && s.cash >= 0) {
+    const deposit = freeTiles(s, true)[0];
+    const top = BUILDINGS.pumpjack.levels[2];
+    const grade = deposit ? pumpGrade(s, { x: deposit.x, y: deposit.y } as GameState['buildings'][number]) : 0;
+    const gain = top.value * (1 + TECHS.yield.step * techLevel(s, 'yield')) * referencePrice(grade) - top.upkeep * (1 - TECHS.energy.step * techLevel(s, 'energy'));
+    const cost = buildCost(s, 'pumpjack') + BUILDINGS.pumpjack.levels[1].cost + top.cost + (deposit ? 0 : parcelPrice(s));
+    if ((gain * 60) / cost > 1.5 * LOANS.ratePerMinute) takeLoan(s);
+  }
+  if ((opts.managers ?? true) && s.features.includes('managers')) {
+    const pay = (MANAGERS.dispatcher.salary + MANAGERS.mechanic.salary) * 600;
+    if (!s.managers.dispatcher && s.cash > pay) setManager(s, 'dispatcher', true);
+    if (!s.managers.mechanic && s.cash > pay) setManager(s, 'mechanic', true);
+  }
+}
+
+function decide(s: GameState, opts: BotOptions = {}): void {
+  const research = opts.research ?? true;
   // Всё построенное ранее, но не подключённое (например, после покупки земли появился путь), подключаем.
   for (const b of s.buildings) if (b.type !== 'hq' && b.status === 'no_route') autoConnect(s, b.id);
   fixBottlenecks(s);
@@ -407,6 +438,7 @@ function decide(s: GameState, research = true): void {
   // Раз в 10 решений (примерно раз в 10 с) — НПЗ: пробный расчёт мест дорогой.
   if (Math.floor(s.time) % 10 === 0) manageRefinery(s);
   if (research && Math.floor(s.time) % 10 === 0) manageResearch(s);
+  if (Math.floor(s.time) % 10 === 0) manageCompany(s, opts);
   // Копим на технологию — новые качалки, разведку и землю откладываем (улучшения и логистика идут дальше).
   const saving = research && !!researchGoal.get(s);
 

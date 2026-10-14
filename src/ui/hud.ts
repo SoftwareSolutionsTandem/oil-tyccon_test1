@@ -159,8 +159,30 @@ export class Hud {
     const selection = el('div', 'panel selection', '<div class="info"></div><div class="actions"></div>');
     const finance = el('div', 'panel', '<h3>Финансы · последние 60 с</h3><div class="body"></div>');
     this.refs.finance = finance.querySelector('.body')!;
-    right.append(selection, finance);
+    right.append(selection, finance, this.buildCompany());
     return right;
+  }
+
+  /** Панель «Компания»: персонал и кредит. Кнопки создаются один раз, значения обновляются в updateCompany. */
+  private buildCompany(): HTMLElement {
+    const panel = el(
+      'div',
+      'panel company',
+      `<h3>Персонал</h3><div class="staff-note small"></div>
+       <div class="staff" data-role="dispatcher"><div class="row"><span class="name">${core.MANAGERS.dispatcher.name}</span><span class="pay small"></span></div><div class="small">Ведёт пороги цен нефти и продуктов: держит до цены выше средней, при заполнении складов продаёт всё.</div><button></button></div>
+       <div class="staff" data-role="mechanic"><div class="row"><span class="name">${core.MANAGERS.mechanic.name}</span><span class="pay small"></span></div><div class="small">Улучшает качалку с лучшей окупаемостью (не дольше ${Math.round(core.MANAGERS.mechanic.payback / 60)} мин), не трогая резерв кассы.</div><label class="small">Резерв кассы, $ <input type="number" min="0" step="1000" data-role="reserve"></label><button></button></div>
+       <h3 style="margin-top:10px">Кредит</h3><div class="loan-body small"></div><div class="row2"><button data-role="take"></button><button data-role="repay">Погасить досрочно</button></div>`,
+    );
+    for (const role of ['dispatcher', 'mechanic'] as const) {
+      const box = panel.querySelector<HTMLElement>(`.staff[data-role=${role}]`)!;
+      box.querySelector('button')!.onclick = () => this.game.setManager(role, !this.s.managers[role]);
+    }
+    const reserve = panel.querySelector<HTMLInputElement>('[data-role=reserve]')!;
+    reserve.onchange = () => core.setManagerReserve(this.s, Number(reserve.value));
+    panel.querySelector<HTMLButtonElement>('[data-role=take]')!.onclick = () => this.game.takeLoan();
+    panel.querySelector<HTMLButtonElement>('[data-role=repay]')!.onclick = () => this.game.repayLoan();
+    this.refs.company = panel;
+    return panel;
   }
 
   update(): void {
@@ -204,6 +226,7 @@ export class Hud {
     this.updateObjective();
     this.updateTech();
     this.updateFinance(minute, cap);
+    this.updateCompany();
     this.updateSelection();
     this.updateHint();
   }
@@ -326,6 +349,62 @@ export class Hud {
     }
   }
 
+  private updateCompany(): void {
+    const s = this.s;
+    const p = this.refs.company;
+    const staffOpen = s.features.includes('managers');
+    const loansOpen = s.features.includes('loans');
+    const goal = (f: 'loans' | 'managers') => core.OBJECTIVES.find((o) => o.features?.includes(f))?.title ?? '—';
+    p.querySelector('.staff-note')!.textContent = staffOpen ? '' : `Откроется после цели «${goal('managers')}»`;
+    for (const role of ['dispatcher', 'mechanic'] as const) {
+      const box = p.querySelector<HTMLElement>(`.staff[data-role=${role}]`)!;
+      box.classList.toggle('locked', !staffOpen);
+      box.querySelector('.pay')!.textContent = `${money(core.MANAGERS[role].salary * 60)}/мин`;
+      const btn = box.querySelector('button')!;
+      btn.textContent = s.managers[role] ? 'Уволить' : 'Нанять';
+      btn.disabled = !staffOpen;
+    }
+    const reserve = p.querySelector<HTMLInputElement>('[data-role=reserve]')!;
+    if (document.activeElement !== reserve) reserve.value = String(s.managers.reserve);
+    reserve.disabled = !staffOpen;
+    const take = p.querySelector<HTMLButtonElement>('[data-role=take]')!;
+    const repay = p.querySelector<HTMLButtonElement>('[data-role=repay]')!;
+    const body = p.querySelector('.loan-body')!;
+    if (!loansOpen) {
+      body.textContent = `Откроется после цели «${goal('loans')}»`;
+      take.textContent = 'Взять кредит';
+      take.disabled = true;
+      repay.style.display = 'none';
+      return;
+    }
+    if (s.loan) {
+      const debt = core.loanDebt(s);
+      const left = s.loan.term - (s.time - s.loan.start);
+      body.innerHTML =
+        kv('Долг', money(debt)) +
+        kv('Платёж', `${money(core.loanPayment(s.loan) * 60)}/мин`) +
+        kv('Осталось', duration(Math.max(0, left))) +
+        kv('Переплата за срок', money(core.loanOverpay(s.loan)));
+      take.textContent = 'Взять кредит';
+      take.disabled = true;
+      repay.style.display = '';
+      repay.disabled = s.cash < debt;
+      repay.textContent = `Погасить досрочно · ${money(debt)}`;
+    } else {
+      const limit = core.loanLimit(s);
+      const L = { principal: Math.max(1, limit), start: 0, rate: core.LOANS.ratePerMinute, term: core.LOANS.termMinutes * 60 };
+      body.innerHTML =
+        kv('Лимит', money(limit)) +
+        kv('Ставка', `${String(core.LOANS.ratePerMinute * 100).replace('.', ',')}% в минуту`) +
+        kv('Срок', `${core.LOANS.termMinutes} мин`) +
+        kv('Платёж при полном лимите', `${money(core.loanPayment(L) * 60)}/мин`) +
+        `<div class="small">Лимит — ${core.LOANS.limitMinutes} мин доходности промысла. Платёж списывается и при минусе кассы.</div>`;
+      take.textContent = `Взять ${money(limit)}`;
+      take.disabled = limit < 1000 || s.cash < 0;
+      repay.style.display = 'none';
+    }
+  }
+
   private updateFinance(m: core.StatBucket, cap: number): void {
     const s = this.s;
     const capacity = core.productionCapacity(s) * 60;
@@ -348,6 +427,8 @@ export class Hud {
       kv('Всего выручки', money(t.revenue)) +
       kv('Всего вложено', money(t.capex)) +
       (s.features.includes('research') || t.research > 0 ? kv('Исследования', money(t.research)) : '') +
+      (t.salaries > 0 ? kv('в т.ч. зарплаты (в расходах)', money(t.salaries)) : '') +
+      (t.borrowed > 0 ? kv('Кредиты: получено / погашено', `${money(t.borrowed)} / ${money(t.repaid)}`) + kv('Проценты', money(t.interest)) : '') +
       `<div class="small" style="margin-top:6px">Вложения в строительство и землю — это инвестиции, они не входят в операционные расходы. Исследования тоже не входят и при сносе не возвращаются.</div>`;
   }
 
@@ -666,6 +747,7 @@ export class Hud {
         slider.value = String(this.s.productThresholds[i]);
         slider.title = `Минимальная цена продажи: ${core.PRODUCTS.names[i].toLowerCase()}`;
         slider.oninput = () => core.setProductThreshold(this.s, i, Number(slider.value));
+        slider.dataset.role = `thr-${i}`;
         out.push(label, slider);
       }
     }
@@ -678,6 +760,7 @@ export class Hud {
       slider.value = String(this.s.sellThreshold);
       slider.title = 'Минимальная цена продажи';
       slider.oninput = () => core.setSellThreshold(this.s, Number(slider.value));
+      slider.dataset.role = 'sell-thr';
       out.push(slider);
     }
     const row = el('div', 'row2');
@@ -706,6 +789,20 @@ export class Hud {
         connect.disabled = !plan.ok;
       }
     }
+    // Пороги ведёт диспетчер сбыта — ручные ползунки заблокированы и показывают его значения.
+    const disp = s.managers.dispatcher;
+    const sellThr = this.selectionActions.querySelector<HTMLInputElement>('[data-role=sell-thr]');
+    if (sellThr) {
+      sellThr.disabled = disp;
+      sellThr.title = disp ? 'Порог ведёт диспетчер сбыта' : 'Минимальная цена продажи';
+      if (disp) sellThr.value = String(s.sellThreshold);
+    }
+    for (let i = 0; i < 3; i++) {
+      const sl = this.selectionActions.querySelector<HTMLInputElement>(`[data-role=thr-${i}]`);
+      if (!sl) continue;
+      sl.disabled = disp;
+      if (disp) sl.value = String(s.productThresholds[i]);
+    }
     if (b.type === 'refinery') {
       for (const feed of ['any', 'light', 'heavy']) {
         this.selectionActions.querySelector(`[data-role=feed-${feed}]`)?.classList.toggle('active', (b.feed ?? 'any') === feed);
@@ -714,7 +811,7 @@ export class Hud {
       if (margin) margin.checked = b.marginOnly !== false;
       for (let i = 0; i < 3; i++) {
         const label = this.selectionActions.querySelector<HTMLElement>(`[data-role=thr-label-${i}]`);
-        if (label) label.textContent = `Мин. цена: ${core.PRODUCTS.names[i].toLowerCase()} — ${s.productThresholds[i] > 0 ? price(s.productThresholds[i]) : 'любая'}`;
+        if (label) label.textContent = `Мин. цена: ${core.PRODUCTS.names[i].toLowerCase()} — ${s.productThresholds[i] > 0 ? price(s.productThresholds[i]) : 'любая'}${disp ? ' (диспетчер)' : ''}`;
       }
     }
     if (b.type === 'pumpjack' || b.type === 'terminal' || b.type === 'refinery') {

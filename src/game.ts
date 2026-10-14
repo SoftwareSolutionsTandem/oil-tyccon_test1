@@ -241,6 +241,25 @@ export class Game {
     this.onToast(`${core.SURVEY_LEVELS[level - 1].name}: −${money(cost)}. Оценка — в панели участка`, 'good');
   }
 
+  setManager(role: core.ManagerRole, on: boolean): void {
+    const r = core.setManager(this.state, role, on);
+    if (!r.ok) return this.onToast(r.reason, 'bad');
+    this.onToast(`${core.MANAGERS[role].name}: ${on ? 'нанят' : 'уволен'}`, 'good');
+  }
+
+  takeLoan(): void {
+    const limit = core.loanLimit(this.state);
+    const r = core.takeLoan(this.state);
+    if (!r.ok) return this.onToast(r.reason, 'bad');
+    this.onToast(`Кредит получен: +${money(limit)}`, 'good');
+  }
+
+  repayLoan(): void {
+    const r = core.repayLoan(this.state);
+    if (!r.ok) return this.onToast(r.reason, 'bad');
+    this.onToast('Кредит погашен досрочно', 'good');
+  }
+
   /** Исследование технологии: только через действие ядра startResearch. */
   research(id: core.TechId): void {
     const next = core.techNextLevel(this.state, id);

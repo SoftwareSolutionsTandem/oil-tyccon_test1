@@ -1,4 +1,4 @@
-import { countOf, lastMinute } from './economy';
+import { capital, countOf, lastMinute } from './economy';
 import type { BuildableType, Feature, GameState } from './types';
 import { isConnected } from './network';
 import { ownedParcelCount } from './world';
@@ -96,6 +96,14 @@ export const OBJECTIVES: Objective[] = [
     },
   },
   {
+    id: 'credit',
+    title: 'Кредит доверия',
+    description: 'Выйдите на добычу 400 баррелей в минуту. Банк откроет кредитную линию: деньги сейчас, аннуитет из будущей прибыли.',
+    reward: 2000,
+    features: ['loans'],
+    progress: (s) => ({ current: lastMinute(s).produced, target: 400 }),
+  },
+  {
     id: 'engineering',
     title: 'Инженерный центр',
     description: 'Выйдите на добычу 600 баррелей в минуту. Откроются исследования: технологии усиливают весь промысел сразу.',
@@ -111,11 +119,19 @@ export const OBJECTIVES: Objective[] = [
     progress: (s) => ({ current: s.totals.productsSold[0] + s.totals.productsSold[1] + s.totals.productsSold[2], target: 200 }),
   },
   {
+    id: 'staff',
+    title: 'Штат специалистов',
+    description: 'Исследуйте 3 уровня технологий. Откроется персонал: диспетчер сбыта и главный механик работают и без вас.',
+    reward: 5000,
+    features: ['managers'],
+    progress: (s) => ({ current: Object.values(s.research.levels).reduce((a: number, v) => a + (v ?? 0), 0), target: 3 }),
+  },
+  {
     id: 'cash_500k',
     title: 'Нефтяная компания',
-    description: 'Накопите $500 000.',
+    description: 'Нарастите капитал до $500 000: касса минус долг по кредиту.',
     reward: 0,
-    progress: (s) => ({ current: s.cash, target: 500_000 }),
+    progress: (s) => ({ current: capital(s), target: 500_000 }),
   },
 ];
 

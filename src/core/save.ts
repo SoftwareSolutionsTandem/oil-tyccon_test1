@@ -45,6 +45,9 @@ export function deserialize(json: string): GameState | null {
   // v5 → v6 — после v4 → v5: обе миграции сдвигают номер цели, каждая по своей цепочке.
   if (s.version < 6) migrateV5(state);
   else if (!validResearch(state)) return null;
+  // v6 → v7 — после v5 → v6: номер цели сдвигается по цепочке v6.
+  if (s.version < 7) migrateV6(state);
+  else if (!validCompany(state)) return null;
   // v3 → v4: разведка. Старые игры видели запасы всех участков бесплатно — это знание сохраняется («известно точно»).
   if (s.version < 4) state.map = { ...state.map, survey: state.map.owned.map(() => SURVEY_EXACT) };
   else if (!Array.isArray(state.map.survey) || state.map.survey.length !== reference.map.survey.length) return null;
@@ -71,6 +74,52 @@ function migrateV5(s: GameState): void {
     s.objectiveIndex += 1;
     s.features.push('research');
   }
+}
+
+/**
+ * v6 → v7: кредиты и персонал (веха 0.4). Новые поля — пустые. В цепочку v6 вставлены «Кредит доверия»
+ * (перед «Инженерным центром», индекс 10) и «Штат специалистов» (после «Переработки»).
+ * - objectiveIndex ≤ 10 — без изменений: игрок на «Инженерном центре» сначала проходит «Кредит доверия».
+ * - 11 («Переработка», центр пройден) → 12; кредиты открыты, как дала бы пропущенная цель (без награды).
+ * - 12 («Нефтяная компания», переработка пройдена) → 14; открыты кредиты и персонал.
+ * - 13 (все цели пройдены) → 15; открыты кредиты и персонал.
+ */
+function migrateV6(s: GameState): void {
+  s.totals = { ...s.totals, salaries: 0, borrowed: 0, repaid: 0, interest: 0 };
+  s.managers = { dispatcher: false, mechanic: false, reserve: 0 };
+  s.loan = null;
+  const i = s.objectiveIndex;
+  const grant = (f: 'loans' | 'managers') => {
+    if (!s.features.includes(f)) s.features = [...s.features, f];
+  };
+  if (i === 11) {
+    s.objectiveIndex = 12;
+    grant('loans');
+  } else if (i >= 12) {
+    s.objectiveIndex = i + 2;
+    grant('loans');
+    grant('managers');
+  }
+}
+
+/**
+ * Проверка полей v7: отсутствующие получают значения по умолчанию (В2), испорченные — сохранение отклоняется.
+ */
+function validCompany(s: GameState): boolean {
+  for (const k of ['salaries', 'borrowed', 'repaid', 'interest'] as const) {
+    if (typeof s.totals[k] !== 'number') s.totals = { ...s.totals, [k]: 0 };
+    if (!Number.isFinite(s.totals[k]) || s.totals[k] < 0) return false;
+  }
+  const m = s.managers as unknown;
+  if (!isRecord(m) || typeof m.dispatcher !== 'boolean' || typeof m.mechanic !== 'boolean') return false;
+  if (typeof m.reserve !== 'number' || !Number.isFinite(m.reserve) || m.reserve < 0) return false;
+  const l = s.loan as unknown;
+  if (l !== null) {
+    if (!isRecord(l)) return false;
+    const ok = (v: unknown, min: number) => typeof v === 'number' && Number.isFinite(v) && v >= min;
+    if (!ok(l.principal, 1) || !ok(l.start, 0) || !ok(l.rate, 0) || !ok(l.term, 1)) return false;
+  }
+  return true;
 }
 
 /**

@@ -61,6 +61,27 @@ export interface ResearchState {
   active: { id: TechId; remaining: number } | null;
 }
 
+/** Менеджеры (веха 0.4): диспетчер сбыта ведёт пороги цен, главный механик улучшает качалки. */
+export type ManagerRole = 'dispatcher' | 'mechanic';
+
+export interface ManagersState {
+  dispatcher: boolean;
+  mechanic: boolean;
+  /** Резерв кассы, ниже которого главный механик не тратит деньги, $. */
+  reserve: number;
+}
+
+/** Кредит-аннуитет: долг считается формулой от времени с выдачи (не накапливает ошибку и одинаков в офлайне). */
+export interface LoanState {
+  principal: number;
+  /** Игровое время выдачи, с. */
+  start: number;
+  /** Ставка за игровую минуту (доля). */
+  rate: number;
+  /** Срок, с. */
+  term: number;
+}
+
 /** Фильтр сырья НПЗ. */
 export type Feed = 'any' | 'light' | 'heavy';
 
@@ -122,6 +143,12 @@ export interface Totals {
   productRevenue: number;
   /** Деньги, потраченные на исследования (не входят в capex: не возвращаются при сносе). */
   research: number;
+  /** Зарплаты менеджеров — часть expenses (операционные расходы), отдельно для разбивки. */
+  salaries: number;
+  /** Кредиты: получено, погашено основного долга, уплачено процентов. */
+  borrowed: number;
+  repaid: number;
+  interest: number;
 }
 
 export interface GameState {
@@ -151,6 +178,8 @@ export interface GameState {
   /** Открытые возможности компании (не здания). */
   features: Feature[];
   research: ResearchState;
+  managers: ManagersState;
+  loan: LoanState | null;
   /** Индекс текущей цели в списке OBJECTIVES. */
   objectiveIndex: number;
   totals: Totals;

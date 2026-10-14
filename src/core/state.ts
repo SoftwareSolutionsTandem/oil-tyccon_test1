@@ -3,7 +3,7 @@ import { emptyBucket } from './economy';
 import { Rng } from './rng';
 import type { GameState, WorldMap } from './types';
 
-export const SAVE_VERSION = 6;
+export const SAVE_VERSION = 7;
 
 export function createNewGame(seed: number = (Math.random() * 2 ** 31) | 0): GameState {
   const map = generateMap(seed);
@@ -23,6 +23,8 @@ export function createNewGame(seed: number = (Math.random() * 2 ** 31) | 0): Gam
     unlocked: ['pumpjack'],
     features: [],
     research: { levels: {}, active: null },
+    managers: { dispatcher: false, mechanic: false, reserve: 0 },
+    loan: null,
     objectiveIndex: 0,
     totals: {
       produced: 0,
@@ -37,6 +39,10 @@ export function createNewGame(seed: number = (Math.random() * 2 ** 31) | 0): Gam
       productsSold: [0, 0, 0],
       productRevenue: 0,
       research: 0,
+      salaries: 0,
+      borrowed: 0,
+      repaid: 0,
+      interest: 0,
     },
     stats: { buckets: [], current: emptyBucket(), currentTime: 0 },
     savedAt: Date.now(),

@@ -64,7 +64,7 @@ function expectConserved(s: GameState) {
 
 function expectBalanced(s: GameState, start: number) {
   const t = s.totals;
-  expect(s.cash).toBeCloseTo(start + t.revenue + t.rewards + t.refunds - t.expenses - t.capex - t.research, 6);
+  expect(s.cash).toBeCloseTo(start + t.revenue + t.rewards + t.refunds + t.borrowed - t.expenses - t.capex - t.research - t.repaid - t.interest, 6);
 }
 
 /** Следит, что хранилище не меняет сорт, пока в нём есть нефть (сорта не смешиваются). */

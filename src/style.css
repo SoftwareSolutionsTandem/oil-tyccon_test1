@@ -144,3 +144,13 @@ label.check { display: flex; align-items: center; gap: 6px; font-size: 12px; mar
 .tech .tech-card button.go { width: 100%; margin-top: 6px; padding: 4px 8px; }
 .tech .tech-card.locked { opacity: 0.5; }
 .tech .active-research { margin-bottom: 6px; }
+
+/* Компания: персонал и кредит */
+.company .staff { border-top: 1px solid var(--panel-border); padding: 8px 0 4px; }
+.company .staff .row { display: flex; justify-content: space-between; align-items: baseline; }
+.company .staff .name { font-weight: 700; }
+.company .staff button { width: 100%; margin-top: 6px; padding: 4px 8px; }
+.company .staff input { width: 90px; margin-left: 4px; background: #1e2833; color: var(--text); border: 1px solid #3d4c5c; border-radius: 4px; padding: 2px 4px; }
+.company .staff.locked { opacity: 0.5; }
+.company .row2 { display: flex; gap: 6px; margin-top: 6px; }
+.company .row2 button { flex: 1; padding: 4px 6px; }

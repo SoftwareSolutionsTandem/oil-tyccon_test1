@@ -14,8 +14,9 @@ import {
   PARCEL_PRICE_GROWTH,
   STATS_WINDOW,
   TECHS,
+  LOANS,
 } from './config';
-import type { BuildableType, Building, GameState, Grade, StatBucket, TechId } from './types';
+import type { BuildableType, Building, GameState, Grade, LoanState, StatBucket, TechId } from './types';
 import { ownedParcelCount, tileIndex } from './world';
 
 export function levelSpec(b: Building) {
@@ -340,4 +341,57 @@ export function lastMinute(s: GameState): StatBucket {
     sum.productRevenue += b.productRevenue ?? 0;
   }
   return sum;
+}
+
+// ——— Кредит (веха 0.4) ———
+
+/** Непрерывная ставка за секунду: (1 + r) за минуту. */
+function loanDelta(loan: LoanState): number {
+  return Math.log(1 + loan.rate) / 60;
+}
+
+/** Платёж аннуитета, $/с: долг гасится ровно к концу срока. */
+export function loanPayment(loan: LoanState): number {
+  const d = loanDelta(loan);
+  const e = Math.exp(d * loan.term);
+  return (loan.principal * d * e) / (e - 1);
+}
+
+/** Долг через tau секунд после выдачи (замкнутая форма, не зависит от длины шага). */
+export function loanDebtAt(loan: LoanState, tau: number): number {
+  if (tau >= loan.term) return 0;
+  const t = Math.max(0, tau);
+  const d = loanDelta(loan);
+  const e = Math.exp(d * t);
+  return Math.max(0, loan.principal * e - (loanPayment(loan) * (e - 1)) / d);
+}
+
+/** Текущий долг компании, $. */
+export function loanDebt(s: GameState): number {
+  return s.loan ? loanDebtAt(s.loan, s.time - s.loan.start) : 0;
+}
+
+/** Переплата по кредиту за весь срок, $ (для интерфейса). */
+export function loanOverpay(loan: LoanState): number {
+  return loanPayment(loan) * loan.term - loan.principal;
+}
+
+/**
+ * «Доходность компании», $/мин: мощность добычи по опорным ценам сортов минус содержание. Основа лимита кредита —
+ * не прибыль последней минуты (она скачет с ценой), а то, что промысел может заработать.
+ */
+export function companyEarning(s: GameState): number {
+  let value = 0;
+  for (const b of s.buildings) if (b.type === 'pumpjack' && b.enabled) value += pumpRate(s, b) * referencePrice(pumpGrade(s, b));
+  return 60 * (value - totalUpkeep(s));
+}
+
+/** Лимит кредита, $ (округлён до сотни). */
+export function loanLimit(s: GameState): number {
+  return Math.max(0, Math.floor((LOANS.limitMinutes * companyEarning(s)) / 100) * 100);
+}
+
+/** Капитал компании: касса минус долг (цель «Нефтяная компания», решение В3). */
+export function capital(s: GameState): number {
+  return s.cash - loanDebt(s);
 }

@@ -1,5 +1,6 @@
 import { MARKET, OFFLINE_CAP, RESEARCH_EPS } from './config';
-import { advanceStats, buildingUpkeep, recordStat } from './economy';
+import { advanceStats, buildingUpkeep, loanDebtAt, loanPayment, recordStat } from './economy';
+import { managersSalary, managersStep } from './managers';
 import { stepLogistics } from './network';
 import { checkObjectives, type Objective } from './objectives';
 import { Rng } from './rng';
@@ -51,10 +52,19 @@ export function tick(s: GameState, dt: number): TickEvents {
   // 3. Содержание зданий.
   let upkeep = 0;
   for (const b of s.buildings) upkeep += buildingUpkeep(b, s);
-  const expenses = upkeep * dt;
+  // Зарплаты менеджеров — операционный расход (входят в expenses), отдельно — для разбивки в финансах.
+  const salaries = managersSalary(s) * dt;
+  const expenses = upkeep * dt + salaries;
   s.cash -= expenses;
   s.totals.expenses += expenses;
+  s.totals.salaries += salaries;
   recordStat(s, 'expenses', expenses);
+
+  // 4. Кредит: платёж аннуитета за шаг (основной долг и проценты — по замкнутой формуле, без накопления ошибки).
+  payLoan(s, dt);
+
+  // 5. Менеджеры: решения на границе периода (после доходов и расходов шага).
+  managersStep(s, dt);
 
   advanceStats(s, dt);
   const completed = checkObjectives(s);
@@ -83,6 +93,26 @@ function advanceResearch(s: GameState, dt: number): Array<{ id: TechId; level: n
   s.research.levels[a.id] = level;
   s.research.active = null;
   return [{ id: a.id, level }];
+}
+
+/**
+ * Платёж по кредиту за шаг: a·Δτ, где основной долг — разность долга в начале и в конце шага, проценты — остаток.
+ * На последнем шаге срока долг становится ровно нулём и кредит закрывается. Платёж списывается и при минусе кассы.
+ */
+function payLoan(s: GameState, dt: number): void {
+  const loan = s.loan;
+  if (!loan) return;
+  const t0 = Math.min(loan.term, Math.max(0, s.time - dt - loan.start));
+  const t1 = Math.min(loan.term, Math.max(0, s.time - loan.start));
+  if (t1 <= t0) return;
+  const d0 = loanDebtAt(loan, t0);
+  const d1 = t1 >= loan.term ? 0 : loanDebtAt(loan, t1);
+  const pay = loanPayment(loan) * (t1 - t0);
+  const principal = d0 - d1;
+  s.cash -= pay;
+  s.totals.repaid += principal;
+  s.totals.interest += pay - principal;
+  if (t1 >= loan.term) s.loan = null;
 }
 
 function updateMarket(s: GameState, dt: number): void {

@@ -9,3 +9,4 @@ export * from './types';
 export * from './world';
 export * from './network';
 export * from './connect';
+export * from './managers';

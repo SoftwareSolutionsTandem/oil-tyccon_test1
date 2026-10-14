@@ -512,8 +512,9 @@ describe('НПЗ: продажа продуктов, действия, сохр�
     expect(m.productThresholds).toEqual([0, 0, 0]);
     expect(m.totals.refined).toBe(0);
     expect(m.totals.productsSold).toEqual([0, 0, 0]);
-    // v4 → v5 сдвигает на одну («Переработка»), v5 → v6 — ещё на одну («Инженерный центр»).
-    expect(m.objectiveIndex).toBe(12);
+    // v4 → v5 сдвигает на одну («Переработка»), v5 → v6 — ещё на одну («Инженерный центр»),
+    // v6 → v7 — на две («Кредит доверия», «Штат специалистов»).
+    expect(m.objectiveIndex).toBe(14);
     expect(OBJECTIVES[m.objectiveIndex].id).toBe('cash_500k');
     expect(m.unlocked).toContain('refinery');
     // Раньше «Стабильной прибыли» — номер и открытые здания не меняются.

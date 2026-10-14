@@ -108,7 +108,7 @@ function runSeed(seed: number, research: boolean): Run {
       shareCount = 0;
     }
     },
-    { research },
+    { research, loans: research, managers: research },
   );
   return { seed, research, reachedAt: result.reachedAt, picks, produced, revenue, throttled, maxThrottleRun: maxRun };
 }
@@ -127,7 +127,7 @@ const table = (head: string[], rows: string[][]) =>
 
 describe('метрики роста (отчёт вехи 0.4)', () => {
   it.skipIf(!LOG)(
-    'бот на пяти картах, 120 минут: без исследований и с исследованиями',
+    'бот на пяти картах, 120 минут: без механик 0.4 и с ними',
     async () => {
       const windows = Array.from({ length: MINUTES / 10 }, (_, i) => [i * 10, i * 10 + 10] as const);
       const gAt = windows.slice(2).map(([, b]) => b);
@@ -141,7 +141,7 @@ describe('метрики роста (отчёт вехи 0.4)', () => {
           await new Promise((r) => setTimeout(r, 0));
         }
         all.push(runs);
-        out.push(`\n## ${research ? 'С исследованиями' : 'Без исследований (база)'}\n`);
+        out.push(`\n## ${research ? 'Механики 0.4: исследования, кредит, персонал' : 'База: без механик 0.4'}\n`);
         out.push('V по окнам, барр./мин:');
         out.push(table(['Карта', ...windows.map(([a, b]) => `${a}–${b}`)], runs.map((r) => [String(r.seed), ...windows.map(([a, b]) => num(V(r, a, b)))])));
         out.push('\nG10 — темп роста добычи за 10 минут (окно, которым заканчивается период):');

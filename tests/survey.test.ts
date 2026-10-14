@@ -22,7 +22,7 @@ const N = { px: START_PARCEL.px + 1, py: START_PARCEL.py };
 
 function expectBalanced(s: GameState, start: number) {
   const t = s.totals;
-  expect(s.cash).toBeCloseTo(start + t.revenue + t.rewards + t.refunds - t.expenses - t.capex - t.research, 6);
+  expect(s.cash).toBeCloseTo(start + t.revenue + t.rewards + t.refunds + t.borrowed - t.expenses - t.capex - t.research - t.repaid - t.interest, 6);
 }
 
 describe('разведка', () => {

@@ -1,4 +1,4 @@
-import { BUILDINGS, MANUAL_SELL_FACTOR, PARCELS_PER_SIDE, PIPE_REFUND, PIPES, SURVEY_EXACT, SURVEY_LEVELS, TECHS } from './config';
+import { BUILDINGS, LOANS, MANUAL_SELL_FACTOR, PARCELS_PER_SIDE, PIPE_REFUND, PIPES, SURVEY_EXACT, SURVEY_LEVELS, TECHS } from './config';
 import {
   buildCost,
   demolishRefund,
@@ -9,10 +9,12 @@ import {
   productPrice,
   recordStat,
   techNextLevel,
+  loanDebt,
+  loanLimit,
   upgradeCost,
 } from './economy';
 import { componentOf, getNetwork, lastFlow, syncOil } from './network';
-import type { ActionResult, BuildableType, Feed, GameState, Grade, TechId } from './types';
+import type { ActionResult, BuildableType, Feed, GameState, Grade, ManagerRole, TechId } from './types';
 import {
   buildingAt,
   getBuilding,
@@ -309,6 +311,46 @@ export function startResearch(s: GameState, id: TechId): ActionResult {
   s.cash -= next.cost;
   s.totals.research += next.cost;
   s.research.active = { id, remaining: next.time };
+  return OK;
+}
+
+/** Нанять или уволить менеджера. Найм бесплатный, зарплата идёт с каждой секунды работы. */
+export function setManager(s: GameState, role: ManagerRole, on: boolean): ActionResult {
+  if (!s.features.includes('managers')) return fail('Персонал ещё не открыт — выполняйте цели');
+  s.managers = { ...s.managers, [role]: on };
+  return OK;
+}
+
+/** Резерв кассы для главного механика. */
+export function setManagerReserve(s: GameState, value: number): void {
+  s.managers = { ...s.managers, reserve: Math.max(0, Math.round(value)) };
+}
+
+/**
+ * Взять кредит: один за раз, не больше лимита, не при отрицательной кассе. Деньги поступают сразу
+ * (totals.borrowed), погашение — аннуитетом в tick.
+ */
+export function takeLoan(s: GameState, amount = loanLimit(s)): ActionResult {
+  if (!s.features.includes('loans')) return fail('Кредиты ещё не открыты — выполняйте цели');
+  if (s.loan) return fail('Уже есть кредит — сначала погасите его');
+  if (s.cash < 0) return fail('Касса в минусе — банк не выдаёт кредит');
+  const limit = loanLimit(s);
+  const L = Math.round(Math.min(amount, limit));
+  if (L < 1000) return fail('Лимит кредита слишком мал — нарастите добычу');
+  s.loan = { principal: L, start: s.time, rate: LOANS.ratePerMinute, term: LOANS.termMinutes * 60 };
+  s.cash += L;
+  s.totals.borrowed += L;
+  return OK;
+}
+
+/** Досрочное погашение: вся сумма долга сразу, без штрафа. */
+export function repayLoan(s: GameState): ActionResult {
+  if (!s.loan) return fail('Кредита нет');
+  const debt = loanDebt(s);
+  if (s.cash < debt) return fail('Недостаточно денег для погашения');
+  s.cash -= debt;
+  s.totals.repaid += debt;
+  s.loan = null;
   return OK;
 }
 
