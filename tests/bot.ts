@@ -73,9 +73,38 @@ export function runBot(
     for (const o of ev.completed) reachedAt[o.id] = s.time;
     onTick?.(ev, s);
     minCash = Math.min(minCash, s.cash);
-    if (i % 10 === 0) decide(s, opts.research ?? true);
+    noteIssues(s);
+    if (i % 10 === 0) {
+      decide(s, opts.research ?? true);
+      recentIssues.delete(s);
+    }
   }
   return { reachedAt, minCash };
+}
+
+/** Узкое место, замеченное за шаги между решениями: статус и поток того шага, где оно было. */
+interface Issue {
+  status: 'throttled' | 'full';
+  bottleneck: number;
+  path: number[];
+}
+/**
+ * Узкие места за все шаги между решениями бота. Статус бывает на границе (хранилище то полно, то почти полно)
+ * и меняется через шаг; бот, глядящий только на последний шаг, видел бы одну фазу и не реагировал.
+ */
+const recentIssues = new WeakMap<GameState, Map<number, Issue>>();
+
+function noteIssues(s: GameState): void {
+  const flow = lastFlow(s);
+  if (!flow) return;
+  let m = recentIssues.get(s);
+  for (const b of s.buildings) {
+    if (b.status !== 'throttled' && b.status !== 'full') continue;
+    if (b.type !== 'pumpjack' && b.type !== 'terminal' && b.type !== 'refinery') continue;
+    if (!m) recentIssues.set(s, (m = new Map()));
+    const c = flow.clients.get(b.id);
+    m.set(b.id, { status: b.status, bottleneck: c?.bottleneck ?? -1, path: c ? [...c.path] : [] });
+  }
 }
 
 /** Сорта нефти, которые сейчас есть в хранилищах компании (битовая маска). */
@@ -239,12 +268,17 @@ function fixBottlenecks(s: GameState): void {
   }
   const net = getNetwork(s);
   const flow = lastFlow(s)!;
+  const issues = recentIssues.get(s);
+  // Статус и поток: текущий шаг, а если сейчас проблемы нет — последний шаг, где она была.
+  const statusOf = (b: GameState['buildings'][number]) => (b.status === 'throttled' || b.status === 'full' ? b.status : (issues?.get(b.id)?.status ?? b.status));
+  const flowOf = (b: GameState['buildings'][number]) =>
+    b.status === 'throttled' || b.status === 'full' ? flow.clients.get(b.id) : (issues?.get(b.id) ?? flow.clients.get(b.id));
   const xy = (t: number) => [t % s.map.size, Math.floor(t / s.map.size)] as [number, number];
   // Вывоз упирается в промысловую трубу (терминал или НПЗ «ограничен трубой») — она меняется на магистраль,
   // как кнопкой «Усилить маршрут»: иначе нефть копится в дальних коллекторах, а качалки стоят.
   for (const o of s.buildings) {
-    if ((o.type !== 'terminal' && o.type !== 'refinery') || o.status !== 'throttled') continue;
-    const c = flow.clients.get(o.id);
+    if ((o.type !== 'terminal' && o.type !== 'refinery') || statusOf(o) !== 'throttled') continue;
+    const c = flowOf(o);
     const bt = c?.bottleneck ?? -1;
     if (bt < 0 || s.map.pipes[bt] !== 1) continue;
     const path = [...new Set([bt, ...c!.path])].filter((t) => s.map.pipes[t] === 1).map(xy);
@@ -252,9 +286,10 @@ function fixBottlenecks(s: GameState): void {
     return;
   }
   for (const b of s.buildings) {
-    if (b.type !== 'pumpjack' || (b.status !== 'throttled' && b.status !== 'full')) continue;
+    const status = statusOf(b);
+    if (b.type !== 'pumpjack' || (status !== 'throttled' && status !== 'full')) continue;
     const st = net.reach.get(b.id)?.[0]?.storage;
-    if (b.status === 'full') {
+    if (status === 'full') {
       // Хранилище у качалки полно: не хватает вывоза — терминал прямо у ближайшего хранилища или его улучшение.
       if (!st || !s.unlocked.includes('terminal')) continue;
       if (sellAtStorage(s, st) === 'none') continue; // у этого хранилища делать нечего — следующая качалка
@@ -270,7 +305,7 @@ function fixBottlenecks(s: GameState): void {
     // маршруте к ближайшему хранилищу: промысловую трубу там меняем на магистраль; если упирается магистраль,
     // улучшать нечего — вывоз у источника, как при «склад полон» (дальний промысел за единственной магистралью).
     if (st && levelSpec(st).value - (st.stored ?? 0) <= 1e-6) {
-      const c = flow.clients.get(b.id);
+      const c = flowOf(b);
       const bt = c?.bottleneck ?? -1;
       if (bt >= 0 && s.map.pipes[bt] === 1) {
         const path = [...new Set([bt, ...c!.path])].filter((t) => s.map.pipes[t] === 1).map(xy);

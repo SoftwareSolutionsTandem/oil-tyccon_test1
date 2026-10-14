@@ -321,8 +321,11 @@ export function lastFlow(s: GameState): FlowInfo | undefined {
 
 const free = (b: Building) => Math.max(0, levelSpec(b).value - (b.stored ?? 0));
 
-/** Сколько раундов перераспределения за тик: остаток спроса уходит к следующему по дальности хранилищу. */
-const ROUNDS = 4;
+/**
+ * Сколько раундов перераспределения за тик: остаток спроса уходит к следующему по дальности хранилищу,
+ * а место, освобождённое забором в раунде, принимает закачку в следующем.
+ */
+const ROUNDS = 6;
 
 interface Client {
   b: Building;
@@ -345,7 +348,6 @@ interface Client {
   /** Для забирающих клиентов: маска допустимых сортов (бит 0 — лёгкая, бит 1 — тяжёлая). */
   mask: number;
 }
-
 /** Рабочие массивы расчёта потока за тик (переиспользуются между тиками). */
 interface Scratch {
   /** Остаток пропускной способности трубы за тик, NaN — труба в этом тике ещё не использовалась. */
@@ -355,16 +357,21 @@ interface Scratch {
   load: Float64Array;
 }
 
+
 /**
- * Пропорциональное распределение за несколько раундов. В каждом раунде каждый клиент берёт ближайшее хранилище,
- * где ещё есть что взять (room), поток ограничивается остатком пропускной способности самой загруженной трубы
- * пути и долей хранилища; все применяются одновременно. После насыщения труб следующий раунд ищет маршруты
- * в обход них — так работают параллельные ветки и другие входы в хранилища. Результат не зависит от порядка клиентов.
+ * Общий расчёт потока шага: забирающие клиенты (терминалы, НПЗ; grade < 0) и качалки (grade ≥ 0) в одних раундах
+ * и делят пропускную способность каждой трубы пропорционально запросам — без приоритета фазы. Иначе у
+ * хранилища-тупика забор и закачка через одну трубу чередовались бы по шагам (нейтральное двухшаговое колебание).
+ * oil — нефть, которую можно забрать (только запас на начало шага); room — свободное место для закачки;
+ * level — запас хранилища; grades — сорт запаса на начало шага (−1 — пусто). Всё применяется одновременно
+ * в конце раунда, поэтому результат не зависит от порядка клиентов.
  */
 function allocate(
   net: Network,
   clients: Client[],
+  oil: Float64Array,
   room: Float64Array,
+  level: Float64Array,
   grades: Int8Array,
   sc: Scratch,
   cap: (tile: number) => number,
@@ -373,38 +380,44 @@ function allocate(
 ): void {
   const { spare, touched, load } = sc;
   const left = (t: number) => (spare[t] === spare[t] ? spare[t] : cap(t) * dt);
-  // Качалка: хранилище своего сорта или пустое (−1). Забирающий клиент (терминал, НПЗ): хранилище с нефтью
-  // сорта из его маски — у терминала это сорта не ниже порога цены, у НПЗ — фильтр сырья и маржа (2.1 плана).
-  const fits = (c: Client, si: number) => (c.grade >= 0 ? grades[si] < 0 || grades[si] === c.grade : grades[si] >= 0 && ((c.mask >> grades[si]) & 1) === 1);
+  // Сорт содержимого для закачки: меняется, когда хранилище опустело забором или в него закачали.
+  const content = Int8Array.from(grades);
+  const pushGrade = new Int8Array(grades.length);
+  // Качалка: хранилище своего сорта или пустое. Забирающий клиент: хранилище с нефтью сорта из его маски
+  // (у терминала — сорта не ниже порога цены, у НПЗ — фильтр сырья и маржа, 2.1 плана НПЗ).
+  const fits = (c: Client, si: number) =>
+    c.grade >= 0 ? room[si] > 1e-9 && (pushGrade[si] < 0 || pushGrade[si] === c.grade) : oil[si] > 1e-9 && grades[si] >= 0 && ((c.mask >> grades[si]) & 1) === 1;
   const asked = new Float64Array(room.length);
+  const askedPull = new Float64Array(room.length);
   const askedBy = [new Float64Array(room.length), new Float64Array(room.length)];
   for (let round = 0; round < ROUNDS; round++) {
+    for (let si = 0; si < level.length; si++) pushGrade[si] = level[si] > 1e-9 ? content[si] : -1;
     const saturated: number[] = [];
     for (const t of touched) if (spare[t] <= 1e-9) saturated.push(t);
     saturated.sort((a, b) => a - b);
     const reach = saturated.length ? detourReach(net, saturated) : net.reach;
-    const active: Array<{ c: Client; si: number; path: number[]; amount: number }> = [];
+    const active: Array<{ c: Client; si: number; path: number[]; amount: number; req: number }> = [];
     for (const c of clients) {
       if (c.need <= 1e-9) continue;
       c.list = reach.get(c.b.id) ?? [];
-      // Ближайшее хранилище, где есть место (нефть). Маршруты этого раунда уже обходят насыщенные трубы.
-      let to: Client['list'][number] | undefined;
-      for (const r of c.list)
-        if (room[r.si] > 1e-9 && fits(c, r.si)) {
-          to = r;
-          break;
-        }
+      // Ближайшее подходящее хранилище. Маршруты этого раунда уже обходят насыщенные трубы.
+      const to = c.list.find((r) => fits(c, r.si));
       if (!to) continue;
-      active.push({ c, si: to.si, path: to.path, amount: c.need });
+      // Заявка на трубу (req) — не больше, чем можно забрать из хранилища (налить в него): иначе клиент занял бы
+      // долю трубы, которую не использует, и соседи получали бы её только в следующем раунде — при общем
+      // хранилище это снова давало бы чередование «забор x, закачка C − x» по шагам. Доля самого хранилища
+      // делится по полному запросу (amount), если труба его не ограничила.
+      const avail = c.grade >= 0 ? room[to.si] : oil[to.si];
+      active.push({ c, si: to.si, path: to.path, amount: c.need, req: Math.min(c.need, avail) });
       if (round === 0) {
         c.firstPath = to.path;
         c.firstStorage = to.storage.id;
       }
     }
     if (!active.length) return;
-    // Нагрузка труб в этом раунде и масштаб по самому узкому месту пути.
-    for (const a of active) for (const t of a.path) load[t] += a.amount;
-    if (round === 0) for (const a of active) for (const t of a.path) info.demand[t] += a.amount / dt;
+    // Нагрузка труб в этом раунде — забор и закачка вместе — и масштаб по самому узкому месту пути.
+    for (const a of active) for (const t of a.path) load[t] += a.req;
+    if (round === 0) for (const a of active) for (const t of a.path) info.demand[t] += a.req / dt;
     for (const a of active) {
       let k = 1;
       let worst = -1;
@@ -415,7 +428,7 @@ function allocate(
           worst = t;
         }
       }
-      a.amount *= Math.max(0, k);
+      if (k < 1) a.amount = a.req * Math.max(0, k);
       if (worst >= 0 && k < 0.999) {
         a.c.piped = true;
         if (a.c.bottleneck < 0) a.c.bottleneck = worst;
@@ -426,22 +439,35 @@ function allocate(
     // (при равенстве — лёгкую); другой сорт ищет место в следующем раунде.
     askedBy[0].fill(0);
     askedBy[1].fill(0);
-    for (const a of active) if (a.c.grade >= 0 && grades[a.si] < 0) askedBy[a.c.grade][a.si] += a.amount;
+    for (const a of active) if (a.c.grade >= 0 && pushGrade[a.si] < 0) askedBy[a.c.grade][a.si] += a.amount;
     for (const a of active) {
-      if (a.c.grade < 0 || grades[a.si] >= 0) continue;
+      if (a.c.grade < 0 || pushGrade[a.si] >= 0) continue;
       const winner = askedBy[1][a.si] > askedBy[0][a.si] ? 1 : 0;
       if (a.c.grade !== winner && askedBy[winner][a.si] > 0) a.amount = 0;
     }
-    // Доля хранилища: если просят больше, чем есть места (нефти), — пропорционально.
+    // Доля хранилища: если просят больше, чем есть места (нефти), — пропорционально; место и нефть — раздельно.
     asked.fill(0);
-    for (const a of active) asked[a.si] += a.amount;
+    askedPull.fill(0);
+    for (const a of active) (a.c.grade >= 0 ? asked : askedPull)[a.si] += a.amount;
+    for (const a of active) {
+      const want = a.c.grade >= 0 ? asked[a.si] : askedPull[a.si];
+      const have = a.c.grade >= 0 ? room[a.si] : oil[a.si];
+      if (want > 0) a.amount *= Math.min(1, have / want);
+    }
     let movedAny = false;
-    for (const a of active) if (asked[a.si] > 0) a.amount *= Math.min(1, room[a.si] / asked[a.si]);
     for (const a of active) {
       if (a.amount <= 0) continue;
       movedAny = true;
-      room[a.si] = Math.max(0, room[a.si] - a.amount);
-      if (a.c.grade >= 0) grades[a.si] = a.c.grade;
+      if (a.c.grade >= 0) {
+        room[a.si] = Math.max(0, room[a.si] - a.amount);
+        level[a.si] += a.amount;
+        content[a.si] = a.c.grade;
+      } else {
+        oil[a.si] = Math.max(0, oil[a.si] - a.amount);
+        level[a.si] = Math.max(0, level[a.si] - a.amount);
+        // Забранное освобождает место — закачка может занять его в следующем раунде.
+        room[a.si] += a.amount;
+      }
       a.c.need -= a.amount;
       a.c.moved += a.amount;
       const st = net.storages[a.si];
@@ -585,9 +611,31 @@ export function stepLogistics(s: GameState, dt: number): StepResult {
     }
     record(c);
   }
+  // Качалки — клиенты того же расчёта: забор и закачка делят трубы пропорционально.
+  const pumps: Array<Client & { tiles: number[]; pool: number }> = [];
+  for (const b of s.buildings) {
+    if (b.type !== 'pumpjack') continue;
+    const tiles = net.drainage.get(b.id)!;
+    let pool = 0;
+    let initial = 0;
+    for (const i of tiles) {
+      pool += s.map.reserve[i];
+      initial += s.map.initial[i];
+    }
+    if (pool <= 0) b.status = 'depleted';
+    else if (!b.enabled) b.status = 'off';
+    else if (!net.reach.has(b.id)) b.status = 'no_route';
+    else pumps.push({ ...client(b, Math.min(pool / dt, rateFromPool(s, b, pool, initial))), tiles, pool, grade: pumpGrade(s, b) });
+  }
   const oil = new Float64Array(net.storages.length);
-  net.storages.forEach((st, i) => (oil[i] = grades[i] >= 0 ? (st.stored ?? 0) : 0));
-  allocate(net, [...terms, ...refs], oil, grades, sc, cap, info, dt);
+  const room = new Float64Array(net.storages.length);
+  const level = new Float64Array(net.storages.length);
+  net.storages.forEach((st, i) => {
+    oil[i] = grades[i] >= 0 ? (st.stored ?? 0) : 0;
+    room[i] = free(st);
+    level[i] = st.stored ?? 0;
+  });
+  allocate(net, [...terms, ...refs, ...pumps], oil, room, level, grades, sc, cap, info, dt);
   let sold = 0;
   let revenue = productRevenue;
   for (const c of terms) {
@@ -639,27 +687,8 @@ export function stepLogistics(s: GameState, dt: number): StepResult {
     b.status = c.need <= 1e-6 ? 'ok' : c.piped && oilLeft ? 'throttled' : got <= REFINERY.eps ? 'no_feed' : 'ok';
     record(c);
   }
-  net.storages.forEach((st, i) => (grades[i] = (st.stored ?? 0) > 1e-9 ? (st.grade ?? 0) : -1));
 
-  // 2. Добыча: качалки качают в хранилища со свободным местом.
-  const pumps: Array<Client & { tiles: number[]; pool: number }> = [];
-  for (const b of s.buildings) {
-    if (b.type !== 'pumpjack') continue;
-    const tiles = net.drainage.get(b.id)!;
-    let pool = 0;
-    let initial = 0;
-    for (const i of tiles) {
-      pool += s.map.reserve[i];
-      initial += s.map.initial[i];
-    }
-    if (pool <= 0) b.status = 'depleted';
-    else if (!b.enabled) b.status = 'off';
-    else if (!net.reach.has(b.id)) b.status = 'no_route';
-    else pumps.push({ ...client(b, Math.min(pool / dt, rateFromPool(s, b, pool, initial))), tiles, pool, grade: pumpGrade(s, b) });
-  }
-  const room = new Float64Array(net.storages.length);
-  net.storages.forEach((st, i) => (room[i] = free(st)));
-  allocate(net, pumps, room, grades, sc, cap, info, dt);
+  // 2. Добыча: принятое хранилищами зачисляется после забора (забор брал только запас начала шага).
   let produced = 0;
   for (const c of pumps) {
     // Извлечение из зоны дренирования пропорционально запасам клеток; ровно столько, сколько принято хранилищами.
@@ -681,6 +710,10 @@ export function stepLogistics(s: GameState, dt: number): StepResult {
     }
     c.moved = got;
     produced += got;
+  }
+  // Сорт хранилищ после шага — по нему видно, осталось ли место для сорта качалки.
+  net.storages.forEach((st, i) => (grades[i] = (st.stored ?? 0) > 1e-9 ? (st.grade ?? 0) : -1));
+  for (const c of pumps) {
     // Недобор из-за трубы — только если в достижимых хранилищах осталось место; иначе причина — заполненный склад.
     const reachable = net.reach.get(c.b.id) ?? [];
     const roomLeft = reachable.some((r) => room[r.si] > 1e-6 && (grades[r.si] < 0 || grades[r.si] === c.grade));
