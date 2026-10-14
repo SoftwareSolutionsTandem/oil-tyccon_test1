@@ -16,6 +16,8 @@ import {
   levelSpec,
   OBJECTIVES,
   PARCELS_PER_SIDE,
+  parcelRegion,
+  REGIONS,
   parcelEstimate,
   parcelPrice,
   survey,
@@ -62,6 +64,27 @@ export interface BotOptions {
   research?: boolean;
   loans?: boolean;
   managers?: boolean;
+  /** Регионы (веха 0.5): false — бот не разведывает и не покупает землю новых регионов (прогон «без регионов»). */
+  regions?: boolean;
+}
+
+/** Цена самого дешёвого участка, который можно купить (по соседству и в открытых регионах); Infinity — нет такого. */
+function cheapestParcelPrice(s: GameState, opts: BotOptions = {}): number {
+  let best = Infinity;
+  for (let py = 0; py < PARCELS_PER_SIDE; py++)
+    for (let px = 0; px < PARCELS_PER_SIDE; px++) {
+      if ((opts.regions ?? true) === false && parcelRegion(px, py) !== 0) continue;
+      if (canBuyParcel({ ...s, cash: Infinity }, px, py).ok) best = Math.min(best, parcelPrice(s, px, py));
+    }
+  return best === Infinity ? parcelPrice(s) : best;
+}
+
+/** Прибыль качалки 3-го уровня на клетке, $/с: опорная цена сорта клетки, технологии и содержание с поправкой региона. */
+function topPumpGain(s: GameState, deposit: { x: number; y: number } | undefined): number {
+  const top = BUILDINGS.pumpjack.levels[2];
+  const grade = deposit ? pumpGrade(s, { x: deposit.x, y: deposit.y } as GameState['buildings'][number]) : 0;
+  const region = deposit ? REGIONS[s.map.region[deposit.y * s.map.size + deposit.x]] : REGIONS[0];
+  return top.value * (1 + TECHS.yield.step * techLevel(s, 'yield')) * referencePrice(grade) - top.upkeep * region.pumpUpkeep * (1 - TECHS.energy.step * techLevel(s, 'energy'));
 }
 
 /**
@@ -347,7 +370,7 @@ const PUMP_RATE_WINDOW = 600;
  * и начинает исследование, когда денег хватает на цену и минуту содержания. Для «типового проекта» прибыль —
  * экономия на каждой качалке × темп их покупки за последние 10 минут.
  */
-function manageResearch(s: GameState): void {
+function manageResearch(s: GameState, opts: BotOptions): void {
   const hist = pumpHistory.get(s) ?? [];
   hist.push([s.time, countOf(s, 'pumpjack')]);
   while (hist.length > 1 && hist[0][0] < s.time - PUMP_RATE_WINDOW) hist.shift();
@@ -370,9 +393,8 @@ function manageResearch(s: GameState): void {
   // Следующая качалка: постройка + улучшения до 3-го уровня; прибыль 3-го уровня по опорной цене сорта клетки.
   const deposit = freeTiles(s, true)[0];
   const top = BUILDINGS.pumpjack.levels[2];
-  const grade = deposit ? pumpGrade(s, { x: deposit.x, y: deposit.y } as GameState['buildings'][number]) : 0;
-  const pumpGain = top.value * (1 + TECHS.yield.step * techLevel(s, 'yield')) * referencePrice(grade) - top.upkeep * (1 - TECHS.energy.step * techLevel(s, 'energy'));
-  const pumpCost = buildCost(s, 'pumpjack') + BUILDINGS.pumpjack.levels[1].cost + top.cost + (deposit ? 0 : parcelPrice(s));
+  const pumpGain = topPumpGain(s, deposit);
+  const pumpCost = buildCost(s, 'pumpjack') + BUILDINGS.pumpjack.levels[1].cost + top.cost + (deposit ? 0 : cheapestParcelPrice(s, opts));
   const pumpPayback = pumpCost / pumpGain;
   if (!best || best.payback >= pumpPayback) {
     researchGoal.set(s, null);
@@ -388,12 +410,11 @@ function manageResearch(s: GameState): void {
  * Персонал — нанимается, как только открыт и в кассе есть 10 минут зарплаты.
  */
 function manageCompany(s: GameState, opts: BotOptions): void {
-  if ((opts.loans ?? true) && s.features.includes('loans') && !s.loan && s.cash >= 0) {
+  if ((opts.loans ?? true) && !capitalGoal(s, opts) && s.features.includes('loans') && !s.loan && s.cash >= 0) {
     const deposit = freeTiles(s, true)[0];
     const top = BUILDINGS.pumpjack.levels[2];
-    const grade = deposit ? pumpGrade(s, { x: deposit.x, y: deposit.y } as GameState['buildings'][number]) : 0;
-    const gain = top.value * (1 + TECHS.yield.step * techLevel(s, 'yield')) * referencePrice(grade) - top.upkeep * (1 - TECHS.energy.step * techLevel(s, 'energy'));
-    const cost = buildCost(s, 'pumpjack') + BUILDINGS.pumpjack.levels[1].cost + top.cost + (deposit ? 0 : parcelPrice(s));
+    const gain = topPumpGain(s, deposit);
+    const cost = buildCost(s, 'pumpjack') + BUILDINGS.pumpjack.levels[1].cost + top.cost + (deposit ? 0 : cheapestParcelPrice(s, opts));
     if ((gain * 60) / cost > 1.5 * LOANS.ratePerMinute) takeLoan(s);
   }
   if ((opts.managers ?? true) && s.features.includes('managers')) {
@@ -401,6 +422,15 @@ function manageCompany(s: GameState, opts: BotOptions): void {
     if (!s.managers.dispatcher && s.cash > pay) setManager(s, 'dispatcher', true);
     if (!s.managers.mechanic && s.cash > pay) setManager(s, 'mechanic', true);
   }
+}
+
+/**
+ * Цель «Нефтяная компания» (капитал $500 000), за которой открывается пустыня (веха 0.5): бот с регионами копит —
+ * не покупает и не разведывает землю, не начинает исследования и не берёт новый кредит; качалки на своих
+ * месторождениях, улучшения и логистика идут как обычно.
+ */
+function capitalGoal(s: GameState, opts: BotOptions): boolean {
+  return (opts.regions ?? true) && OBJECTIVES[s.objectiveIndex]?.id === 'cash_500k';
 }
 
 function decide(s: GameState, opts: BotOptions = {}): void {
@@ -437,8 +467,21 @@ function decide(s: GameState, opts: BotOptions = {}): void {
 
   // Раз в 10 решений (примерно раз в 10 с) — НПЗ: пробный расчёт мест дорогой.
   if (Math.floor(s.time) % 10 === 0) manageRefinery(s);
-  if (research && Math.floor(s.time) % 10 === 0) manageResearch(s);
+  if (research && !capitalGoal(s, opts) && Math.floor(s.time) % 10 === 0) manageResearch(s, opts);
   if (Math.floor(s.time) % 10 === 0) manageCompany(s, opts);
+  // Цель «Выход в пустыню»: съёмка участка пустыни, ближайшего к своей земле.
+  if ((opts.regions ?? true) && OBJECTIVES[s.objectiveIndex]?.id === 'desert') {
+    let pick: { px: number; py: number; d: number } | null = null;
+    for (let py = 0; py < PARCELS_PER_SIDE; py++)
+      for (let px = 0; px < PARCELS_PER_SIDE; px++) {
+        if (parcelRegion(px, py) !== 1) continue;
+        let d = Infinity;
+        for (let qy = 0; qy < PARCELS_PER_SIDE; qy++)
+          for (let qx = 0; qx < PARCELS_PER_SIDE; qx++) if (s.map.owned[qy * PARCELS_PER_SIDE + qx]) d = Math.min(d, Math.abs(qx - px) + Math.abs(qy - py));
+        if (!pick || d < pick.d) pick = { px, py, d };
+      }
+    if (pick && s.cash >= surveyCost(s, 1, pick.px, pick.py)) survey(s, pick.px, pick.py, 1);
+  }
   // Копим на технологию — новые качалки, разведку и землю откладываем (улучшения и логистика идут дальше).
   const saving = research && !!researchGoal.get(s);
 
@@ -447,15 +490,20 @@ function decide(s: GameState, opts: BotOptions = {}): void {
     // ничего не строим и не покупаем
   } else if (deposit) {
     if (s.cash >= buildCost(s, 'pumpjack')) buildConnected(s, 'pumpjack', deposit.x, deposit.y);
+  } else if (capitalGoal(s, opts)) {
+    // копим капитал: землю не разведываем и не покупаем
   } else {
     // Земля: сначала геологическая съёмка всех соседних участков (по одному за ход), затем сейсморазведка
     // лучшего, если денег с запасом, и покупка по оценке. Тяжёлая нефть дешевле — её запасы бот ценит ниже.
     const cands: Array<{ px: number; py: number }> = [];
     for (let py = 0; py < PARCELS_PER_SIDE; py++)
-      for (let px = 0; px < PARCELS_PER_SIDE; px++) if (canBuyParcel({ ...s, cash: Infinity }, px, py).ok) cands.push({ px, py });
+      for (let px = 0; px < PARCELS_PER_SIDE; px++) {
+        if ((opts.regions ?? true) === false && parcelRegion(px, py) !== 0) continue;
+        if (canBuyParcel({ ...s, cash: Infinity }, px, py).ok) cands.push({ px, py });
+      }
     const unknown = cands.find((c) => surveyLevel(s, c.px, c.py) === 0);
     if (unknown) {
-      if (s.cash >= surveyCost(s, 1)) survey(s, unknown.px, unknown.py, 1);
+      if (s.cash >= surveyCost(s, 1, unknown.px, unknown.py)) survey(s, unknown.px, unknown.py, 1);
       return;
     }
     const mid = (r: { low: number; high: number } | null) => (r ? (r.low + r.high) / 2 : 0);
@@ -463,13 +511,15 @@ function decide(s: GameState, opts: BotOptions = {}): void {
       const e = parcelEstimate(s, c.px, c.py);
       return e.light && e.heavy ? mid(e.light) + mid(e.heavy) * 0.7 : mid(e.reserves) * 0.85;
     };
-    let best: { px: number; py: number; reserves: number } | null = null;
+    // Регион и участок — по цене барреля оценённых запасов (в одном регионе цена одна, и это выбор по запасам).
+    let best: { px: number; py: number; perBarrel: number } | null = null;
     for (const c of cands) {
-      const reserves = value(c);
-      if (!best || reserves > best.reserves) best = { ...c, reserves };
+      // Пустой по оценке участок (нужен ради соседства) — в конце очереди, среди них — дешёвый.
+      const perBarrel = parcelPrice(s, c.px, c.py) / Math.max(1, value(c));
+      if (!best || perBarrel < best.perBarrel) best = { ...c, perBarrel };
     }
     if (!best) return;
-    if (surveyLevel(s, best.px, best.py) < 2 && s.cash >= parcelPrice(s) * 1.25 + surveyCost(s, 2)) {
+    if (surveyLevel(s, best.px, best.py) < 2 && s.cash >= parcelPrice(s, best.px, best.py) * 1.25 + surveyCost(s, 2, best.px, best.py)) {
       survey(s, best.px, best.py, 2);
       return;
     }

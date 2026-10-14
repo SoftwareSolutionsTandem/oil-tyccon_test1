@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createNewGame, TECHS, techEffect, type GameState, type TechId } from '../src/core';
+import { createNewGame, ownedParcelsInRegion, TECHS, techEffect, type GameState, type TechId } from '../src/core';
 import { runBot } from './bot';
 
 /**
@@ -39,9 +39,23 @@ interface Pick {
   pumpSaving: number;
 }
 
+/** Режим прогона: механики 0.4 (исследования, кредит, персонал) и регионы вехи 0.5. */
+interface Mode {
+  research: boolean;
+  regions: boolean;
+  title: string;
+}
+const MODES: Mode[] = [
+  { research: false, regions: false, title: 'База: без механик 0.4 и регионов' },
+  { research: true, regions: false, title: 'Механики 0.4 без регионов' },
+  { research: true, regions: true, title: 'Механики 0.4 и регионы (веха 0.5)' },
+];
+
 interface Run {
   seed: number;
   research: boolean;
+  /** Участков пустыни к концу прогона. */
+  desertParcels: number;
   /** Время целей, с. */
   reachedAt: Record<string, number>;
   picks: Pick[];
@@ -55,7 +69,8 @@ interface Run {
   maxThrottleRun: number;
 }
 
-function runSeed(seed: number, research: boolean): Run {
+function runSeed(seed: number, mode: Mode): Run {
+  const { research, regions } = mode;
   const s = createNewGame(seed);
   const picks: Pick[] = [];
   const produced: number[] = [];
@@ -109,9 +124,9 @@ function runSeed(seed: number, research: boolean): Run {
       shareCount = 0;
     }
     },
-    { research, loans: research, managers: research },
+    { research, loans: research, managers: research, regions },
   );
-  return { seed, research, reachedAt: result.reachedAt, picks, produced, revenue, throttled, maxThrottleRun: maxRun };
+  return { seed, research, desertParcels: ownedParcelsInRegion(s, 1), reachedAt: result.reachedAt, picks, produced, revenue, throttled, maxThrottleRun: maxRun };
 }
 
 /** Среднее по минутам окна (a, b]. */
@@ -122,27 +137,28 @@ const pct = (v: number) => {
   const s = Math.abs(v * 100).toFixed(1);
   return `${s === '0.0' ? '' : v >= 0 ? '+' : '−'}${s.replace('.', ',')}%`;
 };
+const min = (v: number | undefined) => (v === undefined ? '—' : (v / 60).toFixed(1).replace('.', ','));
 const dec = (v: number) => v.toFixed(2).replace('.', ',');
 const table = (head: string[], rows: string[][]) =>
   [`| ${head.join(' | ')} |`, `|${head.map(() => '---').join('|')}|`, ...rows.map((r) => `| ${r.join(' | ')} |`)].join('\n');
 
 describe('метрики роста (отчёт вехи 0.4)', () => {
   it.skipIf(!LOG)(
-    'бот на пяти картах, 120 минут: без механик 0.4 и с ними',
+    'бот на пяти картах, 180 минут: без механик 0.4, с ними, с регионами',
     async () => {
       const windows = Array.from({ length: MINUTES / 10 }, (_, i) => [i * 10, i * 10 + 10] as const);
       const gAt = windows.slice(2).map(([, b]) => b);
       const out: string[] = [];
       const all: Run[][] = [];
-      for (const research of [false, true]) {
+      for (const mode of MODES) {
         const runs: Run[] = [];
         for (const seed of SEEDS) {
-          runs.push(runSeed(seed, research));
+          runs.push(runSeed(seed, mode));
           // Прогон карты занимает секунды — отдаём управление, чтобы воркер vitest не терял связь.
           await new Promise((r) => setTimeout(r, 0));
         }
         all.push(runs);
-        out.push(`\n## ${research ? 'Механики 0.4: исследования, кредит, персонал' : 'База: без механик 0.4'}\n`);
+        out.push(`\n## ${mode.title}\n`);
         out.push('V по окнам, барр./мин:');
         out.push(table(['Карта', ...windows.map(([a, b]) => `${a}–${b}`)], runs.map((r) => [String(r.seed), ...windows.map(([a, b]) => num(V(r, a, b)))])));
         out.push('\nG10 — темп роста добычи за 10 минут (окно, которым заканчивается период):');
@@ -178,6 +194,11 @@ describe('метрики роста (отчёт вехи 0.4)', () => {
           ),
         );
         out.push(`Выполнено на картах: V(170,180) ≥ 0,95·V(140,150) — ${ok((r) => V(r, 170, 180) >= 0.95 * V(r, 140, 150))} из 5.`);
+        if (mode.regions)
+          out.push(
+            `Регионы: «Нефтяная компания» / «Выход в пустыню», мин; участков пустыни к 180-й — ` +
+              runs.map((r) => `${r.seed}: ${min(r.reachedAt.cash_500k)} / ${min(r.reachedAt.desert)}, ${r.desertParcels}`).join('; '),
+          );
         out.push(`\nДоля качалок «ограничено трубой» (средняя по окну) и самый длинный отрезок подряд с долей > ${THROTTLE_SHARE * 100}%:`);
         out.push(
           table(
@@ -192,7 +213,6 @@ describe('метрики роста (отчёт вехи 0.4)', () => {
       }
 
       const [base, res] = all;
-      const min = (v: number | undefined) => (v === undefined ? '—' : (v / 60).toFixed(1).replace('.', ','));
       out.push('\n## Сравнение\n');
       out.push(
         table(
@@ -215,7 +235,7 @@ describe('метрики роста (отчёт вехи 0.4)', () => {
       console.log(out.join('\n'));
 
       // Критерий этапа 0: бот не застревает с перегруженными трубами — и без исследований, и с ними.
-      for (const r of [...base, ...res]) expect(r.maxThrottleRun).toBeLessThanOrEqual(THROTTLE_MAX_RUN);
+      for (const r of all.flat()) expect(r.maxThrottleRun).toBeLessThanOrEqual(THROTTLE_MAX_RUN);
     },
     1_800_000,
   );
