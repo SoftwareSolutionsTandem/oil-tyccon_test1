@@ -46,6 +46,7 @@ export class Hud {
   private toastBox: HTMLElement;
   private sparkline: HTMLCanvasElement;
   private wasNegative = false;
+  private techCards = new Map<core.TechId, HTMLElement>();
 
   constructor(
     private game: Game,
@@ -131,8 +132,26 @@ export class Hud {
     build.append(el('h3', '', 'Трубопроводы'), pipes);
     const objective = el('div', 'panel objective', '<h3>Цель</h3><div class="body"></div>');
     this.refs.objective = objective.querySelector('.body')!;
-    left.append(build, objective);
+    left.append(build, objective, this.buildTech());
     return left;
+  }
+
+  /** Панель «Технологии»: карточки создаются один раз, значения обновляются в updateTech. */
+  private buildTech(): HTMLElement {
+    const panel = el('div', 'panel tech', '<h3>Технологии</h3><div class="locked-note small"></div><div class="active-research"></div>');
+    this.refs.techLocked = panel.querySelector('.locked-note')!;
+    this.refs.techActive = panel.querySelector('.active-research')!;
+    for (const id of core.TECH_IDS) {
+      const spec = core.TECHS[id];
+      const card = el('div', 'tech-card');
+      card.dataset.tech = id;
+      card.innerHTML = `<div class="row"><span class="name">${spec.name}</span><span class="lvl"></span></div><div class="effect small"></div><div class="payback small"></div><button class="go"></button>`;
+      card.title = spec.description;
+      card.querySelector<HTMLButtonElement>('button.go')!.onclick = () => this.game.research(id);
+      this.techCards.set(id, card);
+      panel.append(card);
+    }
+    return panel;
   }
 
   private buildRight(): HTMLElement {
@@ -183,6 +202,7 @@ export class Hud {
 
     this.updateBuildCards();
     this.updateObjective();
+    this.updateTech();
     this.updateFinance(minute, cap);
     this.updateSelection();
     this.updateHint();
@@ -263,6 +283,49 @@ export class Hud {
       <div class="small" style="margin-top:6px">Цель ${s.objectiveIndex + 1} из ${core.OBJECTIVES.length}</div>`;
   }
 
+  private updateTech(): void {
+    const s = this.s;
+    const open = s.features.includes('research');
+    const by = core.OBJECTIVES.find((o) => o.features?.includes('research'));
+    this.refs.techLocked.textContent = open ? '' : `Откроется после цели «${by?.title ?? '—'}»`;
+    const a = s.research.active;
+    if (a) {
+      const lvl = (s.research.levels[a.id] ?? 0) + 1;
+      const total = core.TECHS[a.id].levels[lvl - 1].time;
+      const k = Math.max(0, Math.min(1, 1 - a.remaining / total));
+      this.refs.techActive.innerHTML = `<div class="small">Идёт: ${core.TECHS[a.id].name} ${lvl} · осталось ${duration(Math.ceil(a.remaining))}</div><div class="bar"><div style="width:${k * 100}%"></div></div>`;
+    } else this.refs.techActive.innerHTML = '';
+    for (const [id, card] of this.techCards) {
+      const level = core.techLevel(s, id);
+      const max = core.TECHS[id].levels.length;
+      const next = core.techNextLevel(s, id);
+      card.classList.toggle('locked', !open);
+      card.querySelector('.lvl')!.textContent = `${level}/${max}`;
+      const btn = card.querySelector<HTMLButtonElement>('button.go')!;
+      const effect = card.querySelector('.effect')!;
+      const payback = card.querySelector('.payback')!;
+      if (!next) {
+        effect.textContent = 'Изучено полностью';
+        payback.textContent = '';
+        btn.style.display = 'none';
+        continue;
+      }
+      btn.style.display = '';
+      const e = core.techEffect(s, id);
+      // Эффект следующего уровня для текущего промысла (по средним ценам, без учёта ограничений труб и сбыта).
+      effect.textContent =
+        id === 'standard'
+          ? `Следующая качалка дешевле на ${money(e.pumpSaving)}`
+          : id === 'energy'
+            ? `Содержание −${money(e.upkeep * 60)}/мин`
+            : `Добыча +${rate(e.rate * 60)} · ≈ +${money(e.profit * 60)}/мин`;
+      payback.textContent =
+        id === 'standard' ? `${next.level}-й уровень · ${duration(next.time)}` : `${next.level}-й уровень · ${duration(next.time)} · ${e.profit * 60 >= 1 ? `окупится за ${duration(next.cost / e.profit)}` : id === 'eor' ? 'эффект появится по мере истощения' : 'сейчас нет эффекта'}`;
+      btn.textContent = `Исследовать · ${money(next.cost)}`;
+      btn.disabled = !open || !!a || s.cash < next.cost;
+    }
+  }
+
   private updateFinance(m: core.StatBucket, cap: number): void {
     const s = this.s;
     const capacity = core.productionCapacity(s) * 60;
@@ -284,7 +347,8 @@ export class Hud {
       '<div class="sep"></div>' +
       kv('Всего выручки', money(t.revenue)) +
       kv('Всего вложено', money(t.capex)) +
-      `<div class="small" style="margin-top:6px">Вложения в строительство и землю — это инвестиции, они не входят в операционные расходы.</div>`;
+      (s.features.includes('research') || t.research > 0 ? kv('Исследования', money(t.research)) : '') +
+      `<div class="small" style="margin-top:6px">Вложения в строительство и землю — это инвестиции, они не входят в операционные расходы. Исследования тоже не входят и при сносе не возвращаются.</div>`;
   }
 
   private updateSelection(): void {

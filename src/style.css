@@ -134,3 +134,13 @@ input[type='range'] { width: 100%; accent-color: var(--accent); }
 .row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 6px; }
 .row3 button.active { border-color: var(--accent); color: var(--accent); }
 label.check { display: flex; align-items: center; gap: 6px; font-size: 12px; margin: 4px 0 8px; cursor: pointer; }
+
+/* Технологии */
+.tech .tech-card { border-top: 1px solid var(--panel-border); padding: 8px 0 4px; }
+.tech .tech-card .row { display: flex; justify-content: space-between; align-items: baseline; }
+.tech .tech-card .name { font-weight: 700; }
+.tech .tech-card .lvl { color: var(--accent); font-weight: 700; }
+.tech .tech-card .effect, .tech .tech-card .payback { color: var(--muted); margin-top: 2px; }
+.tech .tech-card button.go { width: 100%; margin-top: 6px; padding: 4px 8px; }
+.tech .tech-card.locked { opacity: 0.5; }
+.tech .active-research { margin-bottom: 6px; }

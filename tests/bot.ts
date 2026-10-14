@@ -35,10 +35,25 @@ import {
   refineryCapacity,
   refineryMargin,
   setProductThreshold,
+  startResearch,
+  techEffect,
+  techLevel,
+  techNextLevel,
+  referencePrice,
+  totalUpkeep,
+  pumpGrade,
+  TECH_IDS,
+  TECHS,
   type BuildableType,
+  type TechId,
   type GameState,
   type TickEvents,
 } from '../src/core';
+
+/** Настройки бота. research: false — исследования не ведутся (базовые прогоны для сравнения с этапом 0). */
+export interface BotOptions {
+  research?: boolean;
+}
 
 /**
  * Простой «жадный» игрок для проверки баланса: показывает, проходима ли игра и с каким темпом.
@@ -48,6 +63,7 @@ export function runBot(
   s: GameState,
   minutes: number,
   onTick?: (ev: TickEvents, s: GameState) => void,
+  opts: BotOptions = {},
 ): { reachedAt: Record<string, number>; minCash: number } {
   const reachedAt: Record<string, number> = {};
   let minCash = s.cash;
@@ -57,7 +73,7 @@ export function runBot(
     for (const o of ev.completed) reachedAt[o.id] = s.time;
     onTick?.(ev, s);
     minCash = Math.min(minCash, s.cash);
-    if (i % 10 === 0) decide(s);
+    if (i % 10 === 0) decide(s, opts.research ?? true);
   }
   return { reachedAt, minCash };
 }
@@ -273,7 +289,56 @@ function fixBottlenecks(s: GameState): void {
   }
 }
 
-function decide(s: GameState): void {
+/** Технология, на которую бот копит (не строит новые качалки и не покупает землю), — до покупки или пересмотра. */
+const researchGoal = new WeakMap<GameState, TechId | null>();
+/** История числа качалок (время, число) — темп покупки для оценки «типового проекта». */
+const pumpHistory = new WeakMap<GameState, Array<[number, number]>>();
+/** Окно оценки темпа покупки качалок, с. */
+const PUMP_RATE_WINDOW = 600;
+
+/**
+ * Исследования (раздел 4.6 M04_DESIGN): раз в 10 с окупаемость следующего уровня каждой технологии
+ * `цена / Δприбыль в секунду` сравнивается с окупаемостью следующей качалки (постройка и улучшение до 3-го уровня,
+ * а если свободных клеток месторождений нет — плюс участок). Если технология окупается быстрее, бот копит на неё
+ * и начинает исследование, когда денег хватает на цену и минуту содержания. Для «типового проекта» прибыль —
+ * экономия на каждой качалке × темп их покупки за последние 10 минут.
+ */
+function manageResearch(s: GameState): void {
+  const hist = pumpHistory.get(s) ?? [];
+  hist.push([s.time, countOf(s, 'pumpjack')]);
+  while (hist.length > 1 && hist[0][0] < s.time - PUMP_RATE_WINDOW) hist.shift();
+  pumpHistory.set(s, hist);
+  if (!s.features.includes('research') || s.research.active) {
+    researchGoal.set(s, null);
+    return;
+  }
+  const pumpRateNow = hist.length > 1 ? (hist[hist.length - 1][1] - hist[0][1]) / Math.max(1, hist[hist.length - 1][0] - hist[0][0]) : 0;
+  let best: { id: TechId; cost: number; payback: number } | null = null;
+  for (const id of TECH_IDS) {
+    const next = techNextLevel(s, id);
+    if (!next) continue;
+    const e = techEffect(s, id);
+    const gain = id === 'standard' ? e.pumpSaving * pumpRateNow : e.profit;
+    if (gain <= 0) continue;
+    const payback = next.cost / gain;
+    if (!best || payback < best.payback) best = { id, cost: next.cost, payback };
+  }
+  // Следующая качалка: постройка + улучшения до 3-го уровня; прибыль 3-го уровня по опорной цене сорта клетки.
+  const deposit = freeTiles(s, true)[0];
+  const top = BUILDINGS.pumpjack.levels[2];
+  const grade = deposit ? pumpGrade(s, { x: deposit.x, y: deposit.y } as GameState['buildings'][number]) : 0;
+  const pumpGain = top.value * (1 + TECHS.yield.step * techLevel(s, 'yield')) * referencePrice(grade) - top.upkeep * (1 - TECHS.energy.step * techLevel(s, 'energy'));
+  const pumpCost = buildCost(s, 'pumpjack') + BUILDINGS.pumpjack.levels[1].cost + top.cost + (deposit ? 0 : parcelPrice(s));
+  const pumpPayback = pumpCost / pumpGain;
+  if (!best || best.payback >= pumpPayback) {
+    researchGoal.set(s, null);
+    return;
+  }
+  if (s.cash >= best.cost + totalUpkeep(s) * 60 && startResearch(s, best.id).ok) researchGoal.set(s, null);
+  else researchGoal.set(s, best.id);
+}
+
+function decide(s: GameState, research = true): void {
   // Всё построенное ранее, но не подключённое (например, после покупки земли появился путь), подключаем.
   for (const b of s.buildings) if (b.type !== 'hq' && b.status === 'no_route') autoConnect(s, b.id);
   fixBottlenecks(s);
@@ -306,9 +371,14 @@ function decide(s: GameState): void {
 
   // Раз в 10 решений (примерно раз в 10 с) — НПЗ: пробный расчёт мест дорогой.
   if (Math.floor(s.time) % 10 === 0) manageRefinery(s);
+  if (research && Math.floor(s.time) % 10 === 0) manageResearch(s);
+  // Копим на технологию — новые качалки, разведку и землю откладываем (улучшения и логистика идут дальше).
+  const saving = research && !!researchGoal.get(s);
 
-  const deposit = freeTiles(s, true)[0];
-  if (deposit) {
+  const deposit = saving ? undefined : freeTiles(s, true)[0];
+  if (saving) {
+    // ничего не строим и не покупаем
+  } else if (deposit) {
     if (s.cash >= buildCost(s, 'pumpjack')) buildConnected(s, 'pumpjack', deposit.x, deposit.y);
   } else {
     // Земля: сначала геологическая съёмка всех соседних участков (по одному за ход), затем сейсморазведка

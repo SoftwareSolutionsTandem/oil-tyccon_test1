@@ -241,6 +241,14 @@ export class Game {
     this.onToast(`${core.SURVEY_LEVELS[level - 1].name}: −${money(cost)}. Оценка — в панели участка`, 'good');
   }
 
+  /** Исследование технологии: только через действие ядра startResearch. */
+  research(id: core.TechId): void {
+    const next = core.techNextLevel(this.state, id);
+    const r = core.startResearch(this.state, id);
+    if (!r.ok) return this.onToast(r.reason, 'bad');
+    this.onToast(`Исследование «${core.TECHS[id].name}» ${next?.level ?? ''}-го уровня начато: −${money(next?.cost ?? 0)}`, 'good');
+  }
+
   buyParcel(px: number, py: number): void {
     const r = core.buyParcel(this.state, px, py);
     if (!r.ok) return this.onToast(r.reason, 'bad');
@@ -253,10 +261,16 @@ export class Game {
     const ev = core.tick(this.state, dt);
     if (ev.autoRevenue > 0) this.renderer.addTerminalRevenue(this.state, ev.autoRevenue);
     for (const o of ev.completed) this.announce(o);
+    for (const r of ev.researched) this.announceResearch(r);
+  }
+
+  announceResearch(r: { id: core.TechId; level: number }): void {
+    this.onToast(`Исследование завершено: «${core.TECHS[r.id].name}», уровень ${r.level}`, 'good');
   }
 
   announce(o: core.Objective): void {
-    const unlocks = o.unlocks?.map((t) => core.BUILDINGS[t].name).join(', ');
+    const features = (o.features ?? []).map((f) => (f === 'research' ? 'исследования' : f === 'loans' ? 'кредиты' : 'персонал'));
+    const unlocks = [...(o.unlocks?.map((t) => core.BUILDINGS[t].name) ?? []), ...features].join(', ');
     const reward = o.reward > 0 ? ` +${money(o.reward)}` : '';
     this.onToast(`Цель выполнена: «${o.title}»${reward}${unlocks ? `. Открыто: ${unlocks}` : ''}`, 'good');
   }
