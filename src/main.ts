@@ -1,6 +1,7 @@
 import './style.css';
 import * as core from './core';
 import { createDemoState } from './demo';
+import { createLateState } from './late';
 import { Game, isPipeTool } from './game';
 import { Camera, worldToTile } from './render/iso';
 import { Renderer } from './render/renderer';
@@ -35,9 +36,12 @@ function save(): void {
   }
 }
 
-const demo = new URLSearchParams(location.search).has('demo');
+const params = new URLSearchParams(location.search);
+/** Сцены для проверки (?demo — эталон графики, ?late — поздняя игра для замеров) не трогают настоящее сохранение. */
+const late = params.has('late');
+const demo = params.has('demo') || late;
 const loaded = demo ? null : loadSave();
-const game = new Game(loaded ?? (demo ? createDemoState() : core.createNewGame()), renderer);
+const game = new Game(loaded ?? (late ? createLateState() : demo ? createDemoState() : core.createNewGame()), renderer);
 const DAYNIGHT_KEY = 'oil-tycoon-daynight';
 try {
   renderer.dayNight = localStorage.getItem(DAYNIGHT_KEY) !== 'off';
@@ -126,8 +130,62 @@ let drag: { x: number; y: number; button: number; moved: boolean } | null = null
 /** Протяжка трубы левой кнопкой: камера при этом не двигается. */
 let pipeDrag = false;
 
+/** Касания: щипок двумя пальцами — масштаб и сдвиг; после щипка до отпускания всех пальцев кликов нет. */
+const touches = new Map<number, { x: number; y: number }>();
+let pinch: { dist: number; mx: number; my: number } | null = null;
+let pinched = false;
+/** Стройка касанием ждёт подтверждения: место выбрано, здание показано призраком. */
+let pendingBuild: { x: number; y: number } | null = null;
+
+function pinchState(): { dist: number; mx: number; my: number } {
+  const [a, b] = [...touches.values()];
+  return { dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+}
+
+function clearPendingBuild(): void {
+  pendingBuild = null;
+  hud.showBuildConfirm(null, false, () => {}, () => {});
+}
+
+/** Касание в режиме стройки: здание не ставится сразу — сначала подтверждение (палец не строит при прокрутке). */
+function proposeBuild(x: number, y: number): void {
+  const type = game.mode;
+  if (!type || isPipeTool(type)) return;
+  pendingBuild = { x, y };
+  game.hover = pendingBuild;
+  const check = core.canBuild(game.state, type, x, y);
+  const text = check.ok ? `${core.BUILDINGS[type].name} · ${money(core.buildCost(game.state, type))}` : check.reason;
+  hud.showBuildConfirm(
+    text,
+    check.ok,
+    () => {
+      game.click(x, y);
+      clearPendingBuild();
+      hud.update();
+    },
+    () => {
+      clearPendingBuild();
+      game.hover = null;
+    },
+  );
+}
+
 canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture(e.pointerId);
+  if (e.pointerType === 'touch') {
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touches.size >= 2) {
+      // Второй палец: щипок. Начатые протяжка трубы и сдвиг камеры отменяются.
+      pinch = pinchState();
+      pinched = true;
+      drag = null;
+      if (pipeDrag) {
+        pipeDrag = false;
+        game.pipeStart = null;
+      }
+      return;
+    }
+  }
   if (e.button === 0 && isPipeTool(game.mode)) {
     const t = tileAtScreen(e.clientX, e.clientY);
     game.pipeDown(t.x, t.y);
@@ -138,14 +196,28 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 
 canvas.addEventListener('pointermove', (e) => {
-  const tile = tileAtScreen(e.clientX, e.clientY);
-  const inside = core.inBounds(game.state, tile.x, tile.y);
-  game.hover = inside ? tile : null;
-  game.hoverOutside = !inside;
+  if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && touches.size >= 2) {
+      const now = pinchState();
+      const { w, h } = renderer.size;
+      camera.x -= (now.mx - pinch.mx) / camera.zoom;
+      camera.y -= (now.my - pinch.my) / camera.zoom;
+      camera.zoomAt(now.dist / pinch.dist, now.mx, now.my, w, h);
+      pinch = now;
+      return;
+    }
+  }
+  if (e.pointerType !== 'touch' || pipeDrag) {
+    const tile = tileAtScreen(e.clientX, e.clientY);
+    const inside = core.inBounds(game.state, tile.x, tile.y);
+    game.hover = inside ? tile : null;
+    game.hoverOutside = !inside;
+  }
   if (!drag) return;
   const dx = e.clientX - drag.x;
   const dy = e.clientY - drag.y;
-  if (!drag.moved && Math.hypot(dx, dy) < 5) return;
+  if (!drag.moved && Math.hypot(dx, dy) < (e.pointerType === 'touch' ? 10 : 5)) return;
   drag.moved = true;
   camera.x -= dx / camera.zoom;
   camera.y -= dy / camera.zoom;
@@ -153,7 +225,18 @@ canvas.addEventListener('pointermove', (e) => {
   drag.y = e.clientY;
 });
 
+function releasePointer(e: PointerEvent): boolean {
+  if (e.pointerType !== 'touch') return false;
+  touches.delete(e.pointerId);
+  if (touches.size < 2) pinch = null;
+  if (!pinched) return false;
+  if (touches.size === 0) pinched = false;
+  drag = null;
+  return true;
+}
+
 canvas.addEventListener('pointerup', (e) => {
+  if (releasePointer(e)) return;
   if (pipeDrag && e.button === 0) {
     pipeDrag = false;
     const t = tileAtScreen(e.clientX, e.clientY);
@@ -164,8 +247,11 @@ canvas.addEventListener('pointerup', (e) => {
   if (drag && !drag.moved) {
     if (drag.button === 0) {
       const t = tileAtScreen(e.clientX, e.clientY);
-      game.click(t.x, t.y);
-      hud.update();
+      if (e.pointerType === 'touch' && game.mode && !isPipeTool(game.mode)) proposeBuild(t.x, t.y);
+      else {
+        game.click(t.x, t.y);
+        hud.update();
+      }
     } else if (drag.button === 2) {
       game.cancel();
     }
@@ -173,7 +259,15 @@ canvas.addEventListener('pointerup', (e) => {
   drag = null;
 });
 
-canvas.addEventListener('pointerleave', () => {
+canvas.addEventListener('pointercancel', (e) => {
+  releasePointer(e);
+  drag = null;
+  pipeDrag = false;
+});
+
+canvas.addEventListener('pointerleave', (e) => {
+  // После касания указатель «уходит» сразу — призрак выбранного места стройки остаётся.
+  if (e.pointerType === 'touch') return;
   game.hover = null;
   game.hoverOutside = false;
 });
@@ -252,6 +346,11 @@ function frame(now: number): void {
   if (held.has('arrowup')) camera.y -= pan;
   if (held.has('arrowdown')) camera.y += pan;
 
+  // Место стройки, выбранное касанием, держится до подтверждения или смены режима.
+  if (pendingBuild) {
+    if (!game.mode || isPipeTool(game.mode)) clearPendingBuild();
+    else game.hover = pendingBuild;
+  }
   const building = game.mode && !isPipeTool(game.mode) ? game.mode : null;
   const ghost = building && game.hover ? { type: building, ok: core.canBuild(game.state, building, game.hover.x, game.hover.y).ok } : null;
   const preview = game.pipePreview();
@@ -291,6 +390,39 @@ function frame(now: number): void {
 
 hud.update();
 requestAnimationFrame(frame);
+
+// ?perf — частота кадров, время кадра и память рендера на экране (для замеров на телефоне).
+if (params.has('perf')) {
+  const box = document.createElement('div');
+  box.className = 'perf panel';
+  document.body.append(box);
+  let frames = 0;
+  let since = performance.now();
+  let frameMsSum = 0;
+  const count = (now: number) => {
+    frames++;
+    frameMsSum += renderer.frameMs;
+    if (now - since >= 1000) {
+      const mem = renderer.memoryStats();
+      box.textContent = `${((frames * 1000) / (now - since)).toFixed(0)} к/с · кадр ${(frameMsSum / frames).toFixed(1)} мс · ${mem.total.toFixed(0)} МБ · ${game.state.buildings.length} зд.`;
+      frames = 0;
+      frameMsSum = 0;
+      since = now;
+    }
+    requestAnimationFrame(count);
+  };
+  requestAnimationFrame(count);
+}
+
+// PWA: service worker только в продакшен-сборке. Сбой регистрации (например, игра в iframe платформы,
+// где service worker запрещён) не мешает игре — она просто работает без офлайн-кеша.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  try {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  } catch {
+    // нет доступа к service worker — играем без него
+  }
+}
 
 // Доступ из консоли браузера и автотестов (Playwright).
 Object.assign(window, { oilTycoon: { game, camera, renderer, core } });
