@@ -154,3 +154,36 @@ label.check { display: flex; align-items: center; gap: 6px; font-size: 12px; mar
 .company .staff.locked { opacity: 0.5; }
 .company .row2 { display: flex; gap: 6px; margin-top: 6px; }
 .company .row2 button { flex: 1; padding: 4px 6px; }
+
+/* Замеры (?perf) */
+.perf { position: fixed; left: 50%; transform: translateX(-50%); bottom: 6px; padding: 4px 10px; font: 12px/1.3 ui-monospace, monospace; z-index: 50; pointer-events: none; }
+
+/* Узкий экран (≤ 600 px): верхняя строка, нижний лист с вкладками, лист выбранного здания. Десктоп не меняется. */
+.sheet, .sel-sheet, .confirm-bar { display: none; }
+@media (max-width: 600px) {
+  #hud button { min-height: 40px; min-width: 40px; }
+  .left, .right { display: none; }
+  .topbar { top: 0; left: 0; right: 0; border-radius: 0 0 10px 10px; padding: 4px 8px; gap: 8px; flex-wrap: nowrap; overflow: hidden; }
+  .topbar .stat { min-width: 0 !important; }
+  .topbar .stat .label, .topbar .stat .sub, .topbar .bar, canvas.spark, .topbar .speed, .topbar .spacer { display: none; }
+  .topbar .stat:nth-of-type(4), .topbar .stat:nth-of-type(5) { display: none; }
+  .topbar .stat .value { font-size: 14px; }
+  .topbar [data-ref=sell] { padding: 4px 8px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  .sheet { display: flex; flex-direction: column; position: absolute; left: 0; right: 0; bottom: 0; border-radius: 10px 10px 0 0; padding: 0; }
+  .sheet .tabs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px; padding: 4px; }
+  .sheet .tabs button { padding: 4px 2px; font-size: 11px; min-width: 0; }
+  .sheet .tabs button.active { border-color: var(--accent); color: var(--accent); }
+  .sheet .sheet-body { display: none; max-height: 28vh; overflow-y: auto; padding: 0 8px; }
+  .sheet.open .sheet-body { display: block; }
+  .sheet .sheet-body > .panel { background: none; border: none; box-shadow: none; backdrop-filter: none; padding: 8px 2px; }
+  .sheet .sheet-body > .tab-hidden { display: none; }
+  .sel-sheet.open { display: block; position: absolute; left: 0; right: 0; bottom: 52px; max-height: 45vh; overflow-y: auto; padding: 10px 12px; border-radius: 10px 10px 0 0; }
+  .sel-sheet .close { position: absolute; right: 8px; top: 8px; }
+  .sel-sheet .selection { background: none; border: none; box-shadow: none; backdrop-filter: none; padding: 0; }
+  .confirm-bar { position: absolute; left: 8px; right: 8px; bottom: 60px; padding: 8px; align-items: center; gap: 8px; }
+  .confirm-bar.open { display: flex; }
+  .confirm-bar .text { flex: 1; font-size: 12px; }
+  .hint { bottom: 60px; font-size: 11px; }
+  .toasts { top: 52px; width: calc(100% - 16px); }
+  .perf { bottom: 60px; }
+}

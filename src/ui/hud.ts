@@ -6,6 +6,18 @@ import { bbl, duration, money, num, price, rate } from './format';
 
 const BUILDABLE: BuildableType[] = ['pumpjack', 'tank', 'terminal', 'refinery'];
 
+/** Вкладки нижнего листа на узком экране. */
+type MobileTab = 'build' | 'objective' | 'finance' | 'tech' | 'company';
+const MOBILE_TABS: Array<[MobileTab, string]> = [
+  ['build', 'Стройка'],
+  ['objective', 'Цель'],
+  ['finance', 'Финансы'],
+  ['tech', 'Технологии'],
+  ['company', 'Компания'],
+];
+/** Узкий экран: нижний лист вместо боковых колонок. Десктоп не меняется. */
+const MOBILE_QUERY = '(max-width: 600px)';
+
 const STATUS_TEXT: Record<Building['status'], [string, 'ok' | 'warn' | 'bad']> = {
   ok: ['Работает', 'ok'],
   off: ['Законсервировано', 'warn'],
@@ -47,6 +59,14 @@ export class Hud {
   private sparkline: HTMLCanvasElement;
   private wasNegative = false;
   private techCards = new Map<core.TechId, HTMLElement>();
+  /** Панели HUD — для переноса в нижний лист на узком экране. */
+  private panels: Record<string, HTMLElement> = {};
+  private mobile = false;
+  private activeTab: MobileTab | null = null;
+  private sheet!: HTMLElement;
+  private selSheet!: HTMLElement;
+  /** Подтверждение стройки касанием (узкий экран). */
+  private confirmBar!: HTMLElement;
 
   constructor(
     private game: Game,
@@ -64,8 +84,84 @@ export class Hud {
     this.selectionActions = this.selectionPanel.querySelector('.actions')!;
     this.sparkline = this.root.querySelector('canvas.spark')!;
     this.refs.hint = this.root.appendChild(el('div', 'hint panel'));
+    this.buildMobile();
     this.toastBox = this.root.appendChild(el('div', 'toasts'));
     game.onToast = (text, kind) => this.toast(text, kind);
+  }
+
+  /**
+   * Узкий экран: панели переносятся в нижний лист с вкладками (по умолчанию свёрнут — видна только строка вкладок),
+   * выбранное здание — в отдельный лист с кнопкой закрытия. На широком экране панели возвращаются в колонки.
+   */
+  private buildMobile(): void {
+    this.sheet = el('div', 'sheet panel');
+    const tabs = el('div', 'tabs');
+    for (const [id, label] of MOBILE_TABS) {
+      const b = el('button', '', label);
+      b.dataset.tab = id;
+      b.onclick = () => this.setTab(this.activeTab === id ? null : id);
+      tabs.append(b);
+    }
+    this.sheet.append(el('div', 'sheet-body'), tabs);
+    this.selSheet = el('div', 'sel-sheet panel');
+    const close = el('button', 'close', '✕');
+    close.title = 'Закрыть';
+    close.onclick = () => this.game.cancel();
+    this.selSheet.append(close);
+    this.confirmBar = el('div', 'confirm-bar panel', '<span class="text"></span>');
+    const yes = el('button', 'primary', 'Построить ✓');
+    yes.dataset.role = 'confirm-yes';
+    const no = el('button', '', '✕');
+    no.dataset.role = 'confirm-no';
+    this.confirmBar.append(yes, no);
+    this.root.append(this.sheet, this.selSheet, this.confirmBar);
+    const mq = window.matchMedia(MOBILE_QUERY);
+    const apply = () => this.setMobile(mq.matches);
+    mq.addEventListener('change', apply);
+    apply();
+  }
+
+  private setMobile(on: boolean): void {
+    this.mobile = on;
+    document.body.classList.toggle('mobile', on);
+    const left = this.root.querySelector('.left')!;
+    const right = this.root.querySelector('.right')!;
+    const body = this.sheet.querySelector('.sheet-body')!;
+    if (on) {
+      for (const [id] of MOBILE_TABS) {
+        this.panels[id].dataset.tab = id;
+        body.append(this.panels[id]);
+      }
+      this.selSheet.append(this.panels.selection);
+    } else {
+      left.append(this.panels.build, this.panels.objective, this.panels.tech);
+      right.append(this.panels.selection, this.panels.finance, this.panels.company);
+    }
+    this.setTab(this.activeTab);
+  }
+
+  private setTab(tab: MobileTab | null): void {
+    this.activeTab = tab;
+    for (const [id] of MOBILE_TABS) {
+      this.panels[id].classList.toggle('tab-hidden', this.mobile && id !== tab);
+      this.sheet.querySelector(`[data-tab=${id}]`)?.classList.toggle('active', id === tab);
+    }
+    this.sheet.classList.toggle('open', tab !== null);
+  }
+
+  /** Узкий экран: выбор места для стройки касанием ждёт подтверждения. null — убрать панель. */
+  showBuildConfirm(text: string | null, ok: boolean, onYes: () => void, onNo: () => void): void {
+    this.confirmBar.classList.toggle('open', text !== null);
+    if (text === null) return;
+    this.confirmBar.querySelector('.text')!.textContent = text;
+    const yes = this.confirmBar.querySelector<HTMLButtonElement>('[data-role=confirm-yes]')!;
+    yes.disabled = !ok;
+    yes.onclick = onYes;
+    this.confirmBar.querySelector<HTMLButtonElement>('[data-role=confirm-no]')!.onclick = onNo;
+  }
+
+  get isMobile(): boolean {
+    return this.mobile;
   }
 
   private get s(): GameState {
@@ -132,7 +228,11 @@ export class Hud {
     build.append(el('h3', '', 'Трубопроводы'), pipes);
     const objective = el('div', 'panel objective', '<h3>Цель</h3><div class="body"></div>');
     this.refs.objective = objective.querySelector('.body')!;
-    left.append(build, objective, this.buildTech());
+    const tech = this.buildTech();
+    this.panels.build = build;
+    this.panels.objective = objective;
+    this.panels.tech = tech;
+    left.append(build, objective, tech);
     return left;
   }
 
@@ -159,7 +259,11 @@ export class Hud {
     const selection = el('div', 'panel selection', '<div class="info"></div><div class="actions"></div>');
     const finance = el('div', 'panel', '<h3>Финансы · последние 60 с</h3><div class="body"></div>');
     this.refs.finance = finance.querySelector('.body')!;
-    right.append(selection, finance, this.buildCompany());
+    const company = this.buildCompany();
+    this.panels.selection = selection;
+    this.panels.finance = finance;
+    this.panels.company = company;
+    right.append(selection, finance, company);
     return right;
   }
 
@@ -528,6 +632,9 @@ export class Hud {
     }
     this.selectionKey = key;
     this.selectionPanel.style.display = key ? '' : 'none';
+    this.selSheet.classList.toggle('open', this.mobile && !!key);
+    // Стройка на узком экране: лист сворачивается, чтобы карта была видна.
+    if (this.mobile && this.game.mode && this.activeTab === 'build') this.setTab(null);
   }
 
   /** Панель НПЗ: загрузка, причины простоя, продукты, сравнение «продать или переработать». */
@@ -944,6 +1051,11 @@ export class Hud {
       '<p>Игра сохраняется автоматически каждые 10 секунд.</p>',
       [
         { label: 'Как играть', onClick: () => this.showHelp() },
+        {
+          // На узком экране кнопок скорости в верхней строке нет — переключение здесь (пауза → 1× → 2× → 4×).
+          label: `Скорость: ${this.game.speed === 0 ? 'пауза' : this.game.speed + '×'} (сменить)`,
+          onClick: () => (this.game.speed = [1, 2, 4, 0][([0, 1, 2, 4].indexOf(this.game.speed) + 1) % 4]),
+        },
         {
           label: `Смена дня и ночи: ${this.handlers.dayNight() ? 'вкл' : 'выкл'}`,
           onClick: () => this.handlers.toggleDayNight(),
