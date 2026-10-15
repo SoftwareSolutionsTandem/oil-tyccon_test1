@@ -3,17 +3,19 @@ import type { BuildableType, Building, GameState } from '../core';
 import { isPipeTool, PIPE_TOOLS, type Game, type PipeTool, type ToastKind } from '../game';
 import { formatClock } from '../render/daylight';
 import { bbl, duration, money, num, price, rate } from './format';
+import { StatsPanel } from './stats';
 
 const BUILDABLE: BuildableType[] = ['pumpjack', 'tank', 'terminal', 'refinery', 'platform'];
 
 /** Вкладки нижнего листа на узком экране. */
-type MobileTab = 'build' | 'objective' | 'finance' | 'tech' | 'company';
+type MobileTab = 'build' | 'objective' | 'finance' | 'tech' | 'company' | 'stats';
 const MOBILE_TABS: Array<[MobileTab, string]> = [
   ['build', 'Стройка'],
   ['objective', 'Цель'],
   ['finance', 'Финансы'],
   ['tech', 'Технологии'],
   ['company', 'Компания'],
+  ['stats', 'Статистика'],
 ];
 /** Узкий экран: нижний лист вместо боковых колонок. Десктоп не меняется. */
 const MOBILE_QUERY = '(max-width: 600px)';
@@ -135,7 +137,7 @@ export class Hud {
       this.selSheet.append(this.panels.selection);
     } else {
       left.append(this.panels.build, this.panels.objective, this.panels.tech);
-      right.append(this.panels.selection, this.panels.finance, this.panels.company);
+      right.append(this.panels.selection, this.panels.finance, this.panels.company, this.panels.stats);
     }
     this.setTab(this.activeTab);
   }
@@ -147,6 +149,8 @@ export class Hud {
       this.sheet.querySelector(`[data-tab=${id}]`)?.classList.toggle('active', id === tab);
     }
     this.sheet.classList.toggle('open', tab !== null);
+    // В листе статистика всегда раскрыта (заголовок-переключатель — для колонки на десктопе).
+    if (tab === 'stats') this.stats.setOpen(true);
   }
 
   /** Узкий экран: выбор места для стройки касанием ждёт подтверждения. null — убрать панель. */
@@ -259,6 +263,7 @@ export class Hud {
    * подтверждения платформой (watch вызывает адаптер, деньги — core.claimAdReward).
    */
   private adButton: HTMLButtonElement | null = null;
+  private stats!: StatsPanel;
 
   enableAds(watch: () => void): void {
     if (this.adButton) return;
@@ -287,10 +292,12 @@ export class Hud {
     const finance = el('div', 'panel', '<h3>Финансы · последние 60 с</h3><div class="body"></div>');
     this.refs.finance = finance.querySelector('.body')!;
     const company = this.buildCompany();
+    this.stats = new StatsPanel(false);
     this.panels.selection = selection;
     this.panels.finance = finance;
     this.panels.company = company;
-    right.append(selection, finance, company);
+    this.panels.stats = this.stats.el;
+    right.append(selection, finance, company, this.stats.el);
     return right;
   }
 
@@ -319,6 +326,7 @@ export class Hud {
   update(): void {
     const s = this.s;
     this.updateAd();
+    this.stats.update(s);
     const cap = core.storageCapacity(s);
     const minute = core.lastMinute(s);
     const profit = minute.revenue - minute.expenses;
