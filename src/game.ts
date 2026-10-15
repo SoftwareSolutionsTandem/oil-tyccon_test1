@@ -1,4 +1,5 @@
 import * as core from './core';
+import type { SoundKind } from './audio/sound';
 import type { BuildableType, GameState } from './core';
 import type { Renderer } from './render/renderer';
 import { money } from './ui/format';
@@ -50,6 +51,8 @@ export class Game {
   /** Курсор над окружением за границей игровой карты. */
   hoverOutside = false;
   onToast: (text: string, kind: ToastKind) => void = () => {};
+  /** Звук события (этап 5): подключает main.ts; без звука — пустышка. */
+  sfx: (kind: SoundKind) => void = () => {};
 
   constructor(
     public state: GameState,
@@ -79,8 +82,12 @@ export class Game {
       const type = this.mode;
       const cost = core.buildCost(s, type);
       const r = core.build(s, type, x, y);
-      if (!r.ok) return this.onToast(r.reason, 'bad');
+      if (!r.ok) {
+        this.sfx('error');
+        return this.onToast(r.reason, 'bad');
+      }
       this.renderer.floatText(x + 0.5, y + 0.5, `−${money(cost)}`, '#ff9d8a');
+      this.sfx('build');
       return;
     }
     if (!core.inBounds(s, x, y)) {
@@ -212,6 +219,7 @@ export class Game {
     const r = core.upgrade(this.state, id);
     if (!r.ok) return this.onToast(r.reason, 'bad');
     if (b && cost) this.renderer.floatText(b.x + 0.5, b.y + 0.5, `Уровень ${b.level}`, '#9fe8ff');
+    this.sfx('build');
   }
 
   demolish(id: number): void {
@@ -234,6 +242,7 @@ export class Game {
     const hq = this.state.buildings.find((b) => b.type === 'hq');
     if (hq) this.renderer.floatText(hq.x + 0.5, hq.y + 0.5, `+${money(r.revenue)}`);
     this.renderer.manualSale();
+    this.sfx('sale');
   }
 
   surveyParcel(px: number, py: number, level: number): void {
@@ -280,16 +289,21 @@ export class Game {
   /** Шаг симуляции + реакция на события. */
   step(dt: number): void {
     const ev = core.tick(this.state, dt);
-    if (ev.autoRevenue > 0) this.renderer.addTerminalRevenue(this.state, ev.autoRevenue);
+    if (ev.autoRevenue > 0) {
+      this.renderer.addTerminalRevenue(this.state, ev.autoRevenue);
+      this.sfx('sale');
+    }
     for (const o of ev.completed) this.announce(o);
     for (const r of ev.researched) this.announceResearch(r);
   }
 
   announceResearch(r: { id: core.TechId; level: number }): void {
+    this.sfx('goal');
     this.onToast(`Исследование завершено: «${core.TECHS[r.id].name}», уровень ${r.level}`, 'good');
   }
 
   announce(o: core.Objective): void {
+    this.sfx('goal');
     const features = (o.features ?? []).map((f) => (f === 'research' ? 'исследования' : f === 'loans' ? 'кредиты' : 'персонал'));
     const unlocks = [...(o.unlocks?.map((t) => core.BUILDINGS[t].name) ?? []), ...features].join(', ');
     const reward = o.reward > 0 ? ` +${money(o.reward)}` : '';

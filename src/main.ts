@@ -7,6 +7,7 @@ import { Camera, worldToTile } from './render/iso';
 import { Renderer } from './render/renderer';
 import { duration, money, num } from './ui/format';
 import { Hud } from './ui/hud';
+import { Sound } from './audio/sound';
 import { detectPlatform, LocalPlatform, pickSave, type Platform } from './platform';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -49,8 +50,16 @@ try {
 } catch {
   // Настройка недоступна — остаётся по умолчанию.
 }
+const sound = new Sound();
+game.sfx = (k) => sound.play(k);
 const hud = new Hud(game, {
   newGame: startNewGame,
+  sound: () => sound.settings,
+  setSoundOn: (on) => {
+    sound.start();
+    sound.setOn(on);
+  },
+  setVolume: (v) => sound.setVolume(v),
   dayNight: () => renderer.dayNight,
   toggleDayNight: () => {
     renderer.dayNight = !renderer.dayNight;
@@ -315,7 +324,7 @@ let platform: Platform = new LocalPlatform();
 const pauses = new Set<string>();
 let speedBeforePause = 1;
 /** Подписчики на паузу (звук, этап 5). */
-const pauseListeners: Array<(paused: boolean) => void> = [];
+const pauseListeners: Array<(paused: boolean) => void> = [(p) => sound.setPaused(p || document.hidden)];
 
 function pause(reason: string): void {
   if (pauses.has(reason)) return;
@@ -384,6 +393,7 @@ void detectPlatform().then(async (p) => {
 
 let hiddenAt = 0;
 document.addEventListener('visibilitychange', () => {
+  sound.setPaused(document.hidden || pauses.size > 0);
   if (document.hidden) {
     hiddenAt = Date.now();
     save();
@@ -464,6 +474,10 @@ function frame(now: number): void {
     cloudTimer = 0;
     saveCloud();
   }
+  // Звук: фон работающих качалок и музыка (замер нагрузки — sound.stats).
+  let working = 0;
+  for (const b of game.state.buildings) if (core.isProducer(b) && (b.status === 'ok' || b.status === 'throttled')) working++;
+  sound.update(working, game.speed > 0);
   saveTimer += dt;
   if (saveTimer > 10) {
     saveTimer = 0;
@@ -509,4 +523,4 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
 }
 
 // Доступ из консоли браузера и автотестов (Playwright).
-Object.assign(window, { oilTycoon: { game, camera, renderer, core, platform: () => platform, pauses, pauseListeners } });
+Object.assign(window, { oilTycoon: { game, camera, renderer, core, sound, platform: () => platform, pauses, pauseListeners } });

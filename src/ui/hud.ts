@@ -77,6 +77,9 @@ export class Hud {
       dayNight: () => boolean;
       toggleDayNight: () => void;
       hour: () => number;
+      sound: () => { on: boolean; volume: number };
+      setSoundOn: (on: boolean) => void;
+      setVolume: (v: number) => void;
     },
   ) {
     this.root = document.getElementById('hud')!;
@@ -1100,6 +1103,15 @@ export class Hud {
         {
           label: `Смена дня и ночи: ${this.handlers.dayNight() ? 'вкл' : 'выкл'}`,
           onClick: () => this.handlers.toggleDayNight(),
+        },
+        {
+          label: `Звук: ${this.handlers.sound().on ? 'вкл' : 'выкл'}`,
+          onClick: () => this.handlers.setSoundOn(!this.handlers.sound().on),
+        },
+        {
+          // Громкость шагами по 20% (кнопка удобнее ползунка на телефоне).
+          label: `Громкость: ${Math.round(this.handlers.sound().volume * 100)}% (сменить)`,
+          onClick: () => this.handlers.setVolume(((Math.round(this.handlers.sound().volume * 5) % 5) + 1) / 5),
         },
         {
           label: 'Новая игра',
