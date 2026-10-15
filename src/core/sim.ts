@@ -1,8 +1,9 @@
-import { MARKET, OFFLINE_CAP, RESEARCH_EPS } from './config';
+import { MARKET, OFFLINE_CAP, RESEARCH_EPS, TECHS } from './config';
 import { advanceStats, buildingUpkeep, loanDebtAt, loanPayment, recordStat } from './economy';
 import { managersSalary, managersStep } from './managers';
 import { stepLogistics } from './network';
 import { checkObjectives, type Objective } from './objectives';
+import { addHistoryMark, advanceHistory } from './history';
 import { Rng } from './rng';
 import type { GameState, TechId, Totals } from './types';
 
@@ -68,6 +69,9 @@ export function tick(s: GameState, dt: number): TickEvents {
 
   advanceStats(s, dt);
   const completed = checkObjectives(s);
+  for (const o of completed) addHistoryMark(s, 'goal', o.title);
+  for (const r of researched) addHistoryMark(s, 'tech', `${TECHS[r.id].name} ${r.level}`);
+  advanceHistory(s, dt);
   return {
     autoSold,
     autoRevenue,

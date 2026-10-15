@@ -4,6 +4,7 @@ import { levelSpec } from './economy';
 import { BASE_MAP_SIZE, MAP_OFFSET, PARCEL_SIZE, PARCELS_PER_SIDE, SURVEY_EXACT, TECH_IDS, TECHS } from './config';
 import { syncOil } from './network';
 import { isParcelOwned, parcelRegion } from './world';
+import { emptyHistory, validHistory } from './history';
 import { createNewGame, SAVE_VERSION } from './state';
 import type { Feature, GameState } from './types';
 
@@ -72,6 +73,10 @@ export function deserialize(json: string): GameState | null {
   if (!Number.isFinite(state.totals.adRewards) || state.totals.adRewards < 0) return null;
   if (state.adLastAt === undefined) state.adLastAt = null;
   if (state.adLastAt !== null && (typeof state.adLastAt !== 'number' || !Number.isFinite(state.adLastAt))) return null;
+  // Статистика (этап 4): нет — пустая история, без повышения версии.
+  // Ссылка из новой игры (reference) не годится: её итоги на начало минуты нулевые.
+  if ((s as { history?: unknown }).history === undefined) state.history = emptyHistory(state);
+  if (!validHistory(state)) return null;
   state.version = SAVE_VERSION;
   return state;
 }

@@ -10,3 +10,4 @@ export * from './world';
 export * from './network';
 export * from './connect';
 export * from './managers';
+export * from './history';

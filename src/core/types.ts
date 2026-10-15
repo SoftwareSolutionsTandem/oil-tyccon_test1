@@ -155,6 +155,18 @@ export interface Totals {
   adRewards: number;
 }
 
+/** Статистика за 4 часа (core/history.ts): кольцевой буфер минутных корзин и отметки. */
+export interface HistoryState {
+  /** Точки подряд по HISTORY_FIELDS.length чисел; при заполнении — по кругу с началом head. */
+  data: number[];
+  head: number;
+  /** Сколько минутных корзин закрыто за всю игру (номер текущей минуты). */
+  total: number;
+  /** Незакрытая минута: прошедшее время, итоги на её начало, интеграл цены. */
+  acc: { t: number; produced: number; revenue: number; expenses: number; price: number };
+  marks: Array<{ minute: number; kind: 'goal' | 'tech'; label: string }>;
+}
+
 export interface GameState {
   version: number;
   seed: number;
@@ -184,6 +196,7 @@ export interface GameState {
   research: ResearchState;
   managers: ManagersState;
   loan: LoanState | null;
+  history: HistoryState;
   /** Игровое время последней награды за рекламу, с (null — не было). */
   adLastAt: number | null;
   /** Индекс текущей цели в списке OBJECTIVES. */

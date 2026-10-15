@@ -1,5 +1,6 @@
 import { BASE_MAP_SIZE, GRADES, HEAVY_CHANCE, HQ_POS, MAP_OFFSET, SURVEY_EXACT, MAP_SIZE, MARKET, PARCEL_SIZE, PARCELS_PER_SIDE, REGIONS, START_CASH, START_PARCEL } from './config';
 import { regionAt } from './world';
+import { emptyHistory } from './history';
 import { emptyBucket } from './economy';
 import { Rng } from './rng';
 import type { GameState, WorldMap } from './types';
@@ -27,6 +28,7 @@ export function createNewGame(seed: number = (Math.random() * 2 ** 31) | 0): Gam
     managers: { dispatcher: false, mechanic: false, reserve: 0 },
     loan: null,
     adLastAt: null,
+    history: emptyHistory(),
     objectiveIndex: 0,
     totals: {
       produced: 0,

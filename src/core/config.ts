@@ -261,6 +261,9 @@ export const LOANS = { limitMinutes: 10, ratePerMinute: 0.008, termMinutes: 30 }
  */
 export const AD_REWARD = { minutes: 5, cooldownMinutes: 10 };
 
+/** Статистика за длительный период (веха 0.5, этап 4): 240 минутных корзин (4 ч), до 200 отметок. */
+export const HISTORY = { minute: 60, points: 240, marks: 200 };
+
 /** Допуск завершения исследования, с: накопленная ошибка суммы шагов не откладывает завершение на шаг. */
 export const RESEARCH_EPS = 1e-6;
 
