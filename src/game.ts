@@ -119,7 +119,7 @@ export class Game {
       for (const [x, y] of path) {
         const have = core.inBounds(s, x, y) ? s.map.pipes[core.tileIndex(s, x, y)] : 0;
         if (have === 1 || have === 2) {
-          cost += Math.round(core.PIPES[have].cost * core.PIPE_REFUND);
+          cost += Math.round(core.pipeCostAt(s, core.tileIndex(s, x, y), have) * core.PIPE_REFUND);
           count++;
         }
       }
@@ -193,9 +193,11 @@ export class Game {
   pipeTile(x: number, y: number, action: 'upgrade' | 'remove'): void {
     const s = this.state;
     if (action === 'upgrade') {
+      const i = core.tileIndex(s, x, y);
+      const cost = core.pipeCostAt(s, i, 2) - core.pipeCostAt(s, i, 1);
       const r = core.layPipes(s, [[x, y]], 2);
       if (!r.ok) return this.onToast(r.reason, 'bad');
-      this.renderer.floatText(x + 0.5, y + 0.5, `−${money(core.PIPES[2].cost - core.PIPES[1].cost)}`, '#ff9d8a');
+      this.renderer.floatText(x + 0.5, y + 0.5, `−${money(cost)}`, '#ff9d8a');
       return;
     }
     const r = core.removePipes(s, [[x, y]]);

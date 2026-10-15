@@ -1,11 +1,11 @@
-import { HQ_POS, type GameState } from '../core';
+import { BASE_MAP_SIZE, HQ_POS, MAP_OFFSET, type GameState } from '../core';
 import type { GroundDecals } from './ground';
 import { mipmap } from './mipmap';
 import { isoX, isoY } from './iso';
 import { bakeSprite, MATERIALS as M, mat, type ModelPainter, type RGB, type Sprite, type V3 } from './model';
 import { createCanvas, grimeTexture, hash2, smoothstep, valueNoise } from './noise';
 import type { SpriteLibrary } from './sprites';
-import { desertWeight, type TerrainLayer } from './terrain';
+import { desertWeight, seaWeight, type TerrainLayer } from './terrain';
 import type { TerrainSource } from './terrainSource';
 
 /**
@@ -108,7 +108,8 @@ export class Environment {
     const n = s.map.size;
     // Региональные дороги вдоль задних сторон карты и съезд от конторы к ним — за пределами игровой территории.
     this.roads = [
-      [[-12, -FAR], [-12, n + FAR]],
+      // Дорога вдоль западного края идёт до берега шельфа (MAP_OFFSET.y + BASE_MAP_SIZE), в море её нет.
+      [[-12, -FAR], [-12, MAP_OFFSET.y + BASE_MAP_SIZE - 3]],
       [[-FAR, -11], [n + FAR, -11]],
       [[-12, HQ_POS.y + 1.1], [0, HQ_POS.y + 1.1]],
     ];
@@ -381,7 +382,8 @@ export class Environment {
   private decorAt(x: number, y: number): number {
     const r = hash2(x, y, 77);
     if (r >= 0.18) return 0; // дешёвая проверка до обращения к шуму
-    // Пустыня за восточным краем — только камни.
+    // В море декора нет; пустыня за восточным краем — только камни.
+    if (seaWeight(x + 0.5, y + 0.5, this.s.seed) > 0.3) return 0;
     if (desertWeight(x + 0.5, y + 0.5) > 0.5) return r < 0.05 ? 2 : 0;
     const grove = this.terrain.sample(x * 0.5 + 500, y * 0.5 - 200).height;
     if (grove > 0.62) return 3;

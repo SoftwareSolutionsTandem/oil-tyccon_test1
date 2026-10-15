@@ -4,7 +4,7 @@ import { isPipeTool, PIPE_TOOLS, type Game, type PipeTool, type ToastKind } from
 import { formatClock } from '../render/daylight';
 import { bbl, duration, money, num, price, rate } from './format';
 
-const BUILDABLE: BuildableType[] = ['pumpjack', 'tank', 'terminal', 'refinery'];
+const BUILDABLE: BuildableType[] = ['pumpjack', 'tank', 'terminal', 'refinery', 'platform'];
 
 /** Вкладки нижнего листа на узком экране. */
 type MobileTab = 'build' | 'objective' | 'finance' | 'tech' | 'company';
@@ -220,7 +220,7 @@ export class Hud {
       card.title =
         spec.kind === 0
           ? 'Протяните по трубам, которые нужно убрать'
-          : 'Протяните мышью от здания или трубы: труба ляжет по своей свободной земле уголком. Поверх промысловой трубы магистраль ляжет как улучшение.';
+          : `Протяните мышью от здания или трубы: труба ляжет по своей свободной земле уголком. Поверх промысловой трубы магистраль ляжет как улучшение. По морю (шельф) — в ${core.REGIONS[2].pipeCost} раза дороже.`;
       card.onclick = () => this.game.setMode(tool);
       this.pipeCards.set(tool, card);
       pipes.append(card);
@@ -561,18 +561,18 @@ export class Hud {
         if (key !== this.selectionKey) {
           const out: HTMLElement[] = [];
           if (kind === 1) {
-            const up = el('button', 'primary', `Заменить на магистраль · ${money(core.PIPES[2].cost - core.PIPES[1].cost)}`);
+            const up = el('button', 'primary', `Заменить на магистраль · ${money(core.pipeCostAt(s, i, 2) - core.pipeCostAt(s, i, 1))}`);
             up.dataset.role = 'pipe-up';
             up.onclick = () => this.game.pipeTile(sel.x, sel.y, 'upgrade');
             out.push(up);
           }
-          const rm = el('button', 'danger', `Демонтировать (+${money(Math.round(core.PIPES[kind as 1 | 2].cost * core.PIPE_REFUND))})`);
+          const rm = el('button', 'danger', `Демонтировать (+${money(Math.round(core.pipeCostAt(s, i, kind as 1 | 2) * core.PIPE_REFUND))})`);
           rm.onclick = () => this.game.pipeTile(sel.x, sel.y, 'remove');
           out.push(rm);
           this.selectionActions.replaceChildren(...out);
         }
         const up = this.selectionActions.querySelector<HTMLButtonElement>('[data-role=pipe-up]');
-        if (up) up.disabled = s.cash < core.PIPES[2].cost - core.PIPES[1].cost;
+        if (up) up.disabled = s.cash < core.pipeCostAt(s, i, 2) - core.pipeCostAt(s, i, 1);
       }
     } else if (sel?.kind === 'parcel') {
       const est = core.parcelEstimate(s, sel.px, sel.py);
@@ -604,6 +604,7 @@ export class Hud {
         <div class="small" style="margin-bottom:8px">Покупка расширяет территорию компании. После покупки запасы известны точно.</div>
         ${kv('Регион', core.REGIONS[region].name)}
         ${region === 1 ? `<div class="small" style="margin-bottom:6px">Пустыня: месторождения крупнее, почти вся нефть тяжёлая; содержание качалок ×${core.REGIONS[1].pumpUpkeep.toLocaleString('ru-RU')}. Цена земли пустыни растёт отдельно от степи.</div>` : ''}
+        ${region === 2 ? `<div class="small" style="margin-bottom:6px">Шельф: море, лёгкая нефть. Строится только морская платформа (7) — на морском месторождении, с зоной в радиусе ${core.PLATFORM.radius} клеток. Трубы по морю в ${core.REGIONS[2].pipeCost} раза дороже; хранилища — на берегу.</div>` : ''}
         ${body}
         ${kv('Цена', money(priceValue))}
         ${!check.ok ? `<div class="small" style="color:var(--bad);margin-top:6px">${check.reason}</div>` : ''}`;
@@ -735,13 +736,13 @@ export class Hud {
     if (b.status === 'no_route') {
       const plan = core.planAutoConnect(s, b.id);
       return `<div class="sep"></div>${kv('Подключение', '<span style="color:var(--bad)">нет пути до хранилища</span>')}
-        <div class="small">${b.type === 'pumpjack' ? 'Нефть не добывается' : 'Терминал не может забирать нефть'}, пока здание не соединено трубой с конторой или резервуаром. ${plan.tiles.length ? `Кратчайшая труба: ${plan.tiles.length} кл. за ${money(plan.cost)}.` : plan.reason ?? ''}</div>`;
+        <div class="small">${core.isProducer(b) ? 'Нефть не добывается' : 'Терминал не может забирать нефть'}, пока здание не соединено трубой с конторой или резервуаром. ${plan.tiles.length ? `Кратчайшая труба: ${plan.tiles.length} кл. за ${money(plan.cost)}.` : plan.reason ?? ''}</div>`;
     }
     if (!f) return '';
     if (b.status === 'wrong_grade') return `<div class="sep"></div>${kv('Нефть идёт в', '<span style="color:var(--bad)">некуда: хранилища заняты другим сортом</span>')}`;
     const target = core.getBuilding(s, f.storage);
     const where = target ? `${core.buildingName(target.type)}${f.path.length ? `, ${f.path.length} кл. трубы` : ', вплотную'}` : '—';
-    let out = `<div class="sep"></div>${kv(b.type === 'pumpjack' ? 'Нефть идёт в' : 'Забирает из', where)}`;
+    let out = `<div class="sep"></div>${kv(core.isProducer(b) ? 'Нефть идёт в' : 'Забирает из', where)}`;
     if (f.bottleneck >= 0) {
       const kind = s.map.pipes[f.bottleneck] as 1 | 2;
       const demand = core.lastFlow(s)!.demand[f.bottleneck];
@@ -763,7 +764,7 @@ export class Hud {
     }
     const spec = core.levelSpec(b);
     const next = core.upgradeCost(b) !== null ? core.BUILDINGS[b.type].levels[b.level] : null;
-    if (b.type === 'pumpjack') {
+    if (core.isProducer(b)) {
       const r = core.pumpRate(s, b);
       const pool = core.drainagePool(s, b);
       const zone = core.drainageTiles(s, b).length;
@@ -780,7 +781,7 @@ export class Hud {
         ${kv('Хватит при работе без простоев', r > 0 ? duration(timeLeft) : '—')}
         ${this.connectionInfo(b)}
         ${next ? `<div class="sep"></div>${kv('След. уровень: добыча', rate(next.value * 60 * (r / core.nominalRate(s, b) || 1)))}${kv('След. уровень: содержание', `${money(next.upkeep * core.upkeepFactor(s) * 60)}/мин`)}` : ''}
-        <div class="small" style="margin-top:6px">Скважина тянет нефть из своей клетки и соседних по сторонам клеток месторождения (зона подсвечена). Добыча снижается по мере истощения (до ${Math.round(core.depletionFloor(s) * 100)}% от номинала).</div>`;
+        <div class="small" style="margin-top:6px">${b.type === 'platform' ? `Платформа тянет нефть из клеток морского месторождения в радиусе ${core.PLATFORM.radius} клеток (зона подсвечена).` : 'Скважина тянет нефть из своей клетки и соседних по сторонам клеток месторождения (зона подсвечена).'} Добыча снижается по мере истощения (до ${Math.round(core.depletionFloor(s) * 100)}% от номинала).</div>`;
     }
     if (b.type === 'tank') {
       return `${head}${kv('В резервуаре', `${num(b.stored ?? 0)} / ${num(spec.value)} барр.`)}${this.storageGrade(b)}${upkeep}<div class="sep"></div>${this.networkSummary(core.componentOf(s, b))}${kv('Вся нефть компании', `${num(s.oil)} / ${num(core.storageCapacity(s))}`)}${next ? `<div class="sep"></div>${kv('След. уровень: ёмкость', bbl(next.value))}` : ''}
@@ -809,7 +810,7 @@ export class Hud {
     up.dataset.role = 'upgrade';
     up.onclick = () => this.game.upgrade(b.id);
     out.push(up);
-    if (b.type === 'pumpjack' || b.type === 'terminal' || b.type === 'refinery') {
+    if (core.isProducer(b) || b.type === 'terminal' || b.type === 'refinery') {
       // До двух вариантов подключения: кратчайший и отдельная ветка (с расчётным потоком).
       for (const idx of [0, 1]) {
         const connect = el('button', idx === 0 ? 'primary' : '');
@@ -924,7 +925,7 @@ export class Hud {
         if (label) label.textContent = `Мин. цена: ${core.PRODUCTS.names[i].toLowerCase()} — ${s.productThresholds[i] > 0 ? price(s.productThresholds[i]) : 'любая'}${disp ? ' (диспетчер)' : ''}`;
       }
     }
-    if (b.type === 'pumpjack' || b.type === 'terminal' || b.type === 'refinery') {
+    if (core.isProducer(b) || b.type === 'terminal' || b.type === 'refinery') {
       // Варианты считаются, только когда они нужны: здание не подключено или упирается в трубу.
       const opts = b.status === 'no_route' || b.status === 'throttled' ? core.connectOptions(s, b.id) : [];
       for (const idx of [0, 1]) {
@@ -982,10 +983,10 @@ export class Hud {
       let reason = '';
       if (g.hover) {
         const r = core.canBuild(s, g.mode, g.hover.x, g.hover.y);
-        if (r.ok && g.mode === 'pumpjack') {
-          const probe = { id: -1, type: 'pumpjack' as const, x: g.hover.x, y: g.hover.y, level: 1, enabled: true, invested: 0, status: 'ok' as const };
+        if (r.ok && (g.mode === 'pumpjack' || g.mode === 'platform')) {
+          const probe = { id: -1, type: g.mode, x: g.hover.x, y: g.hover.y, level: 1, enabled: true, invested: 0, status: 'ok' as const };
           const n = core.pumpNeighbors(s, g.hover.x, g.hover.y);
-          const row = n.alongX || n.alongY ? ' · встанет в ряд бок о бок' : '';
+          const row = g.mode === 'pumpjack' && (n.alongX || n.alongY) ? ' · встанет в ряд бок о бок' : '';
           const grade = core.GRADES[core.pumpGrade(s, probe)].name.toLowerCase();
           reason = ` · ${grade} нефть, зона: ${core.drainageTiles(s, probe).length} кл., ${bbl(core.drainagePool(s, probe).reserve)}${row}`;
         } else reason = r.ok ? ' · можно строить' : ` · ${r.reason}`;

@@ -292,6 +292,7 @@ window.addEventListener('keydown', (e) => {
   else if (key === '2') game.setMode('tank');
   else if (key === '3') game.setMode('terminal');
   else if (key === '6') game.setMode('refinery');
+  else if (key === '7') game.setMode('platform');
   else if (key === '4') game.setMode('pipe');
   else if (key === '5') game.setMode('trunk');
   else if (key === 'x' || key === 'ч') game.setMode('unpipe');

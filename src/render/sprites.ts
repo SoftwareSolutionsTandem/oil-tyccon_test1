@@ -64,6 +64,10 @@ export class SpriteLibrary {
     return this.get('truckR', () => this.bake((p) => models.truckReverse(p), this.grime, 0.35));
   }
 
+  platform(level: number): Sprite {
+    return this.get(`platform:${level}`, () => this.bake((p) => models.platform(p, level), this.grime, 0.35));
+  }
+
   headquarters(): Sprite {
     return this.get('hq', () => this.bake((p) => models.headquarters(p), this.grime, 0.4));
   }

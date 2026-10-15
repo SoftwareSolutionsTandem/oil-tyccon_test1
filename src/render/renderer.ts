@@ -5,6 +5,7 @@ import {
   pumpOrientAt,
   type PumpOrient,
   drainageTiles,
+  isProducer,
   getNetwork,
   isTileOwned,
   lastFlow,
@@ -380,9 +381,9 @@ export class Renderer {
     }
     const selected = s.buildings.find((b) => b.id === view.selectedBuilding);
     // Зона дренирования: при выборе качалки и при её размещении.
-    let zoneOf: Building | null = selected?.type === 'pumpjack' ? selected : null;
-    if (view.ghost?.type === 'pumpjack' && view.ghost.ok && view.hover) {
-      zoneOf = { id: -1, type: 'pumpjack', x: view.hover.x, y: view.hover.y, level: 1, enabled: true, invested: 0, status: 'ok' };
+    let zoneOf: Building | null = selected && isProducer(selected) ? selected : null;
+    if ((view.ghost?.type === 'pumpjack' || view.ghost?.type === 'platform') && view.ghost.ok && view.hover) {
+      zoneOf = { id: -1, type: view.ghost.type, x: view.hover.x, y: view.hover.y, level: 1, enabled: true, invested: 0, status: 'ok' };
     }
     if (zoneOf && s.map.initial[zoneOf.y * n + zoneOf.x] > 0) {
       // Зона тяжёлой нефти — янтарная, лёгкой — бирюзовая: сорт виден при размещении.
@@ -697,7 +698,7 @@ export class Renderer {
       if (view.selectedPipe) this.tileOutline(view.selectedPipe.x, view.selectedPipe.y, 'rgba(92,225,230,0.95)', 0.05);
       return;
     }
-    if (selected && (selected.type === 'pumpjack' || selected.type === 'terminal' || selected.type === 'refinery')) {
+    if (selected && (isProducer(selected) || selected.type === 'terminal' || selected.type === 'refinery')) {
       const f = flow?.clients.get(selected.id);
       const path = f?.path ?? net.routes.get(selected.id);
       if (!path) return;
@@ -899,6 +900,7 @@ export class Renderer {
     if (b.type === 'tank') return [{ sprite: lib.tank(b.level), dx: 0 }];
     if (b.type === 'hq') return [{ sprite: lib.headquarters(), dx: 0 }];
     if (b.type === 'refinery') return [{ sprite: lib.refinery(b.level), dx: 0 }];
+    if (b.type === 'platform') return [{ sprite: lib.platform(b.level), dx: 0 }];
     const parts = [
       { sprite: lib.terminalBack(b.level), dx: 0 },
       { sprite: lib.terminalFront(b.level), dx: 0 },
@@ -918,6 +920,8 @@ export class Renderer {
         return [() => this.blit(lib.tank(b.level), x, y), () => this.drawGauge(b, fill)];
       case 'refinery':
         return [() => this.blit(lib.refinery(b.level), x, y)];
+      case 'platform':
+        return [() => this.blit(lib.platform(b.level), x, y)];
       case 'hq':
         return [() => this.blit(lib.headquarters(), x, y), () => this.drawFlag(b)];
       case 'terminal': {

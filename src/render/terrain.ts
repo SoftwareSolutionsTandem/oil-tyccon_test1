@@ -1,4 +1,4 @@
-import { BASE_MAP_SIZE, MAP_OFFSET } from '../core/config';
+import { BASE_MAP_SIZE, MAP_OFFSET, MAP_SIZE } from '../core/config';
 import { LIGHT } from './model';
 import { createCanvas, fbm, hash2, smoothstep, valueNoise } from './noise';
 
@@ -21,6 +21,28 @@ const DARK: RGBf = [138, 116, 86];
 const DUNE: RGBf = [230, 196, 130];
 const DUNE_SHADE: RGBf = [204, 160, 100];
 const DUNE_PALE: RGBf = [242, 222, 172];
+
+/** Шельф (веха 0.5, этап 2б): пляж у кромки, отмель, глубокая вода. */
+const BEACH: RGBf = [206, 190, 146];
+const SHALLOW: RGBf = [86, 146, 146];
+const DEEP: RGBf = [40, 86, 108];
+
+/**
+ * Береговая линия (v в клетках). На карте — ровно по границе шельфа (регион 2, core/world.ts regionAt) с
+ * колебанием в пределах клетки, чтобы клетки шельфа были морем, а клетки суши — сушей; за краями карты берег
+ * изгибается сильнее.
+ */
+function coastAt(u: number, seed: number): number {
+  const out = Math.max(0, -u, u - MAP_SIZE);
+  const amp = 0.12 + Math.min(6, out * 0.25);
+  return MAP_OFFSET.y + BASE_MAP_SIZE + (fbm(u * 0.06, 7.3, 2, seed + 21) - 0.5) * 2 * amp;
+}
+
+/** Доля моря в точке мира (0 — суша, 1 — вода). */
+export function seaWeight(u: number, v: number, seed = 0): number {
+  const c = coastAt(u, seed);
+  return smoothstep(c - 0.12, c + 0.12, v);
+}
 
 /**
  * Доля пустыни в точке мира: восточнее старой карты (регион 1, core/world.ts regionAt) с мягким переходом в клетку
@@ -98,12 +120,22 @@ export class TerrainLayer {
       d = mix(d, DUNE_PALE, smoothstep(0.55, 0.75, f.patch) * 0.7);
       c = mix(c, d, w);
     }
-    return { color: c, height: f.height };
+    // Пляж — полоса у кромки на суше; вода темнеет с глубиной, по пятнам — светлые отмели. Рельеф воды плоский.
+    const coast = coastAt(u, this.seed);
+    const beach = smoothstep(coast - 0.9, coast - 0.15, v);
+    if (beach > 0) c = mix(c, BEACH, beach * 0.85);
+    const sea = seaWeight(u, v, this.seed);
+    if (sea > 0) {
+      const depth = smoothstep(0, 9, v - coast);
+      const water = mix(mix(SHALLOW, DEEP, depth), SHALLOW, smoothstep(0.6, 0.8, f.patch) * 0.35 * (1 - depth));
+      c = mix(c, water, sea);
+    }
+    return { color: c, height: f.height * (1 - sea) + 0.5 * sea };
   }
 
   grassAt(u: number, v: number): number {
     const f = this.fields(u, v);
-    return smoothstep(0.42, 0.62, f.biome + (f.patch - 0.5) * 0.35) * (1 - desertWeight(u, v));
+    return smoothstep(0.42, 0.62, f.biome + (f.patch - 0.5) * 0.35) * (1 - desertWeight(u, v)) * (1 - seaWeight(u, v, this.seed));
   }
 
   canvases(): HTMLCanvasElement[] {
@@ -241,6 +273,23 @@ export class TerrainLayer {
     const s = this.seed;
     const h = (i: number) => hash2(tx * 31 + i, ty * 17 + i * 7, s + 11);
     const grass = this.grassAt(tx + 0.5, ty + 0.5);
+    // Море: вместо камней и трещин — гребешки волн, параллельные берегу.
+    const sea = seaWeight(tx + 0.5, ty + 0.5, s);
+    if (sea > 0.5) {
+      const n = lod ? 2 : 3;
+      for (let i = 0; i < n; i++) {
+        const cx = tx + h(400 + i);
+        const cy = ty + h(420 + i);
+        const len = 0.12 + h(440 + i) * 0.2;
+        ctx.beginPath();
+        ctx.moveTo(cx - len, cy);
+        ctx.quadraticCurveTo(cx, cy - 0.05, cx + len, cy);
+        ctx.strokeStyle = `rgba(225,240,240,${(0.16 + h(460 + i) * 0.14).toFixed(3)})`;
+        ctx.lineWidth = 0.016;
+        ctx.stroke();
+      }
+      return;
+    }
     // Рябь на песке пустыни: короткие дуги поперёк ветра (с северо-запада), светлая сторона к свету.
     const desert = desertWeight(tx + 0.5, ty + 0.5);
     if (desert > 0.3) {

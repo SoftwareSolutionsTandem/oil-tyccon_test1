@@ -170,6 +170,20 @@ export class GroundDecals {
       ctx.beginPath();
       ctx.ellipse(-0.5, 0, 0.24, 0.18, 0.4, 0, Math.PI * 2);
       ctx.fill();
+    } else if (b.type === 'platform') {
+      // Платформа стоит в воде: пена у ног опорного блока и маслянистый отлив под палубой.
+      const g = ctx.createRadialGradient(x + 0.5, y + 0.5, 0, x + 0.5, y + 0.5, 0.5);
+      g.addColorStop(0, 'rgba(20,30,34,0.35)');
+      g.addColorStop(1, 'rgba(20,30,34,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(x, y, 1, 1);
+      ctx.strokeStyle = 'rgba(235,245,245,0.55)';
+      ctx.lineWidth = 0.02;
+      for (const [lx, ly] of [[0.2, 0.2], [0.8, 0.2], [0.2, 0.8], [0.8, 0.8]]) {
+        ctx.beginPath();
+        ctx.ellipse(x + lx, y + ly, 0.075, 0.075, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
     } else if (b.type === 'tank') {
       this.roundRect(ctx, x + 0.03, y + 0.03, 0.94, 0.94, 0.08);
       ctx.fillStyle = this.gravel;

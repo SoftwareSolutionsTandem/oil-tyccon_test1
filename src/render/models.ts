@@ -380,6 +380,74 @@ export function refinery(p: ModelPainter, level: number): void {
   });
 }
 
+/**
+ * Морская платформа (веха 0.5, этап 2б). Опорный блок — четыре ноги из воды с раскосами, жёлтая палуба,
+ * решётчатая буровая вышка. 2-й уровень — технологический модуль и кран; 3-й — жилой блок с вертолётной
+ * площадкой и факельная стрела над водой. Высоты — в единицах клетки, как у остальных моделей.
+ */
+export function platform(p: ModelPainter, level: number): void {
+  const deckPaint = mat([206, 160, 40], 0.3, 20);
+  const deckTop = mat([96, 100, 104], 0.08, 8);
+  const z0 = 0.34;
+  const z1 = z0 + 0.05;
+  // Ноги и раскосы: дальние — первыми.
+  const legs: Array<[number, number]> = [
+    [0.2, 0.2],
+    [0.8, 0.2],
+    [0.2, 0.8],
+    [0.8, 0.8],
+  ];
+  for (const [x, y] of legs) {
+    p.cylinder(x, y, 0, 0.06, 0.05, M.rust, null);
+    p.cylinder(x, y, 0.05, 0.045, z0 - 0.05, M.steelDark);
+  }
+  for (const [a, b] of [[0, 1], [0, 2], [1, 3], [2, 3]] as const) {
+    const [ax, ay] = legs[a];
+    const [bx, by] = legs[b];
+    p.tube([ax, ay, 0.08], [bx, by, 0.26], 0.012, M.steel, 6, false);
+    p.tube([ax, ay, 0.26], [bx, by, 0.08], 0.012, M.steel, 6, false);
+  }
+  // Палуба.
+  p.box(0.1, 0.1, z0, 0.9, 0.9, z1, deckPaint, deckTop);
+  // Буровая вышка: четыре сходящиеся стойки, поперечины решётки, кронблок.
+  const bx0 = 0.16;
+  const bx1 = 0.42;
+  const top = z1 + 0.7;
+  const c = (bx0 + bx1) / 2;
+  const foot: Array<[number, number]> = [
+    [bx0, bx0],
+    [bx1, bx0],
+    [bx0, bx1],
+    [bx1, bx1],
+  ];
+  const at = (x: number, k: number) => x + (c - x) * k * 0.7;
+  for (const [x, y] of foot) p.tube([x, y, z1], [at(x, 1), at(y, 1), top], 0.012, M.galvanized, 6);
+  for (let k = 0.2; k < 1; k += 0.2) {
+    const z = z1 + (top - z1) * k;
+    const ring = foot.map(([x, y]) => [at(x, k), at(y, k), z] as V3);
+    for (const [i, j] of [[0, 1], [0, 2], [1, 3], [2, 3]] as const) p.wire(ring[i], ring[j], 0.7, 'rgba(150,154,156,0.95)');
+  }
+  p.box(c - 0.05, c - 0.05, top, c + 0.05, c + 0.05, top + 0.05, M.red);
+  p.box(bx0 - 0.02, bx0 - 0.02, z1, bx1 + 0.02, bx1 + 0.02, z1 + 0.04, M.steelDark);
+  // Технологический модуль и кран (2-й уровень).
+  if (level >= 2) {
+    p.box(0.52, 0.14, z1, 0.86, 0.44, z1 + 0.2, M.wall, M.roofGray);
+    p.face([[0.56, 0.441, z1 + 0.08], [0.82, 0.441, z1 + 0.08], [0.82, 0.441, z1 + 0.14], [0.56, 0.441, z1 + 0.14]], M.glass, [0, 1, 0]);
+    p.cylinder(0.2, 0.66, z1, 0.05, 0.16, deckPaint);
+    p.tube([0.2, 0.66, z1 + 0.16], [0.5, 0.82, z1 + 0.42], 0.016, deckPaint, 6);
+    p.wire([0.5, 0.82, z1 + 0.42], [0.5, 0.82, z1 + 0.18], 0.6, 'rgba(40,40,40,0.9)');
+  }
+  // Жилой блок с вертолётной площадкой и факельная стрела (3-й уровень).
+  if (level >= 3) {
+    p.box(0.56, 0.56, z1, 0.88, 0.88, z1 + 0.16, M.wall, M.roofGray);
+    p.cylinder(0.72, 0.72, z1 + 0.16, 0.15, 0.02, mat([60, 92, 70], 0.06, 8), mat([60, 92, 70], 0.06, 8));
+    // Буква «H» лежит на площадке: ось строки — вправо по экрану, «вверх» буквы — от зрителя (0,012 клетки на пиксель шрифта).
+    p.planeText([0.727, 0.797, z1 + 0.181], [0.0085, -0.0085, 0], [-0.0085, -0.0085, 0], 'H', 11, 'rgba(240,240,232,0.95)');
+    p.tube([0.88, 0.5, z1 + 0.1], [1.12, 0.62, z1 + 0.5], 0.014, M.galvanized, 6);
+    p.cone(1.12, 0.62, z1 + 0.5, 0.025, 0.06, M.red);
+  }
+}
+
 export function truckReverse(p: ModelPainter): void {
   const X = (x: number) => TRUCK_LENGTH - x;
   for (const x of [0.1, 0.21, 0.5]) p.tube([X(x), 0.6, 0.06], [X(x), 0.64, 0.06], 0.058, M.rubber, 10);
