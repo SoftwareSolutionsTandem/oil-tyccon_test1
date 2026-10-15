@@ -16,6 +16,8 @@ import {
   levelSpec,
   OBJECTIVES,
   PARCELS_PER_SIDE,
+  isProducer,
+  drainagePool,
   parcelRegion,
   REGIONS,
   parcelEstimate,
@@ -132,7 +134,7 @@ function noteIssues(s: GameState): void {
   let m = recentIssues.get(s);
   for (const b of s.buildings) {
     if (b.status !== 'throttled' && b.status !== 'full') continue;
-    if (b.type !== 'pumpjack' && b.type !== 'terminal' && b.type !== 'refinery') continue;
+    if (!isProducer(b) && b.type !== 'terminal' && b.type !== 'refinery') continue;
     if (!m) recentIssues.set(s, (m = new Map()));
     const c = flow.clients.get(b.id);
     m.set(b.id, { status: b.status, bottleneck: c?.bottleneck ?? -1, path: c ? [...c.path] : [] });
@@ -215,6 +217,49 @@ export function manageRefinery(s: GameState): void {
       refineryBusy.set(s, 0);
     }
   }
+}
+
+/**
+ * Клетка под морскую платформу на своём шельфе: наибольшие запасы зоны дренирования; окупается ли она —
+ * запасы зоны по опорной цене не меньше 4 цен постройки и улучшений до 3-го уровня.
+ */
+function platformSpot(s: GameState): { x: number; y: number; pool: number } | null {
+  if (!s.unlocked.includes('platform')) return null;
+  let best: { x: number; y: number; pool: number } | null = null;
+  const free = { ...s, cash: Infinity };
+  for (let y = 0; y < s.map.size; y++)
+    for (let x = 0; x < s.map.size; x++) {
+      if (s.map.region[y * s.map.size + x] !== 2 || s.map.initial[y * s.map.size + x] <= 0) continue;
+      if (!canBuild(free, 'platform', x, y).ok) continue;
+      const probe = { id: -1, type: 'platform', x, y, level: 1, enabled: true, invested: 0, status: 'ok' } as GameState['buildings'][number];
+      const pool = drainagePool(s, probe).reserve;
+      if (!best || pool > best.pool) best = { x, y, pool };
+    }
+  if (!best) return null;
+  const full = buildCost(s, 'platform') + BUILDINGS.platform.levels[1].cost + BUILDINGS.platform.levels[2].cost;
+  return best.pool * referencePrice(0) >= 4 * full ? best : null;
+}
+
+/**
+ * Окупаемость следующего добывающего здания, с: постройка и улучшения до 3-го уровня / прибыль 3-го уровня по опорной
+ * цене сорта клетки (с технологиями и поправкой региона на содержание).
+ */
+/** Окупаемость следующей качалки, с, дольше которой бот с регионами покупает землю нового региона. */
+const LAND_SWITCH = 1800;
+
+/** Можно ли купить (при деньгах) участок открытого нового региона рядом со своей землёй. */
+function regionParcelAvailable(s: GameState): boolean {
+  for (let py = 0; py < PARCELS_PER_SIDE; py++)
+    for (let px = 0; px < PARCELS_PER_SIDE; px++) if (parcelRegion(px, py) !== 0 && canBuyParcel({ ...s, cash: Infinity }, px, py).ok) return true;
+  return false;
+}
+
+function producerPayback(s: GameState, type: 'pumpjack' | 'platform', at: { x: number; y: number }): number {
+  const levels = BUILDINGS[type].levels;
+  const cost = buildCost(s, type) + levels[1].cost + levels[2].cost;
+  if (type === 'pumpjack') return cost / Math.max(1e-9, topPumpGain(s, at));
+  const gain = levels[2].value * (1 + TECHS.yield.step * techLevel(s, 'yield')) * referencePrice(0) - levels[2].upkeep * (1 - TECHS.energy.step * techLevel(s, 'energy'));
+  return cost / Math.max(1e-9, gain);
 }
 
 function freeTiles(s: GameState, deposit: boolean): Array<{ x: number; y: number; reserve: number }> {
@@ -319,7 +364,7 @@ function fixBottlenecks(s: GameState): void {
   }
   for (const b of s.buildings) {
     const status = statusOf(b);
-    if (b.type !== 'pumpjack' || (status !== 'throttled' && status !== 'full')) continue;
+    if (!isProducer(b) || (status !== 'throttled' && status !== 'full')) continue;
     const st = net.reach.get(b.id)?.[0]?.storage;
     if (status === 'full') {
       // Хранилище у качалки полно: не хватает вывоза — терминал прямо у ближайшего хранилища или его улучшение.
@@ -469,12 +514,13 @@ function decide(s: GameState, opts: BotOptions = {}): void {
   if (Math.floor(s.time) % 10 === 0) manageRefinery(s);
   if (research && !capitalGoal(s, opts) && Math.floor(s.time) % 10 === 0) manageResearch(s, opts);
   if (Math.floor(s.time) % 10 === 0) manageCompany(s, opts);
-  // Цель «Выход в пустыню»: съёмка участка пустыни, ближайшего к своей земле.
-  if ((opts.regions ?? true) && OBJECTIVES[s.objectiveIndex]?.id === 'desert') {
+  // Цели «Выход в пустыню» и «Выход на шельф»: съёмка участка региона, ближайшего к своей земле.
+  const goalRegion = { desert: 1, shelf: 2 }[OBJECTIVES[s.objectiveIndex]?.id ?? ''];
+  if ((opts.regions ?? true) && goalRegion !== undefined) {
     let pick: { px: number; py: number; d: number } | null = null;
     for (let py = 0; py < PARCELS_PER_SIDE; py++)
       for (let px = 0; px < PARCELS_PER_SIDE; px++) {
-        if (parcelRegion(px, py) !== 1) continue;
+        if (parcelRegion(px, py) !== goalRegion) continue;
         let d = Infinity;
         for (let qy = 0; qy < PARCELS_PER_SIDE; qy++)
           for (let qx = 0; qx < PARCELS_PER_SIDE; qx++) if (s.map.owned[qy * PARCELS_PER_SIDE + qx]) d = Math.min(d, Math.abs(qx - px) + Math.abs(qy - py));
@@ -485,9 +531,16 @@ function decide(s: GameState, opts: BotOptions = {}): void {
   // Копим на технологию — новые качалки, разведку и землю откладываем (улучшения и логистика идут дальше).
   const saving = research && !!researchGoal.get(s);
 
-  const deposit = saving ? undefined : freeTiles(s, true)[0];
+  let deposit = saving ? undefined : freeTiles(s, true)[0];
+  const spot = saving ? null : platformSpot(s);
+  // Качалка дорожает ×1,2 за каждую: если следующая окупается дольше LAND_SWITCH, а рядом есть участок нового
+  // региона, бот идёт за землёй (там — платформы со своей кривой цены), а не копит на качалку.
+  if (deposit && !spot && (opts.regions ?? true) && !capitalGoal(s, opts) && producerPayback(s, 'pumpjack', deposit) > LAND_SWITCH && regionParcelAvailable(s)) deposit = undefined;
   if (saving) {
     // ничего не строим и не покупаем
+  } else if (spot && (!deposit || producerPayback(s, 'platform', spot) < producerPayback(s, 'pumpjack', deposit))) {
+    // Качалка дорожает ×1,2 за каждую — поздно платформа (своя кривая цены) окупается быстрее.
+    if (s.cash >= buildCost(s, 'platform') * 1.2) buildConnected(s, 'platform', spot.x, spot.y);
   } else if (deposit) {
     if (s.cash >= buildCost(s, 'pumpjack')) buildConnected(s, 'pumpjack', deposit.x, deposit.y);
   } else if (capitalGoal(s, opts)) {
@@ -527,7 +580,7 @@ function decide(s: GameState, opts: BotOptions = {}): void {
   }
 
   for (const b of s.buildings) {
-    const cost = b.type === 'pumpjack' ? upgradeCost(b) : null;
+    const cost = isProducer(b) ? upgradeCost(b) : null;
     if (cost !== null && s.cash > cost * 2 && levelSpec(b).value > 0) upgrade(s, b.id);
   }
 }

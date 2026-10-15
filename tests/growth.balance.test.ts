@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createNewGame, ownedParcelsInRegion, TECHS, techEffect, type GameState, type TechId } from '../src/core';
+import { countOf, createNewGame, ownedParcelsInRegion, TECHS, techEffect, type GameState, type TechId } from '../src/core';
 import { runBot } from './bot';
 
 /**
@@ -54,8 +54,10 @@ const MODES: Mode[] = [
 interface Run {
   seed: number;
   research: boolean;
-  /** Участков пустыни к концу прогона. */
+  /** Участков пустыни и шельфа, морских платформ к концу прогона. */
   desertParcels: number;
+  shelfParcels: number;
+  platforms: number;
   /** Время целей, с. */
   reachedAt: Record<string, number>;
   picks: Pick[];
@@ -126,7 +128,7 @@ function runSeed(seed: number, mode: Mode): Run {
     },
     { research, loans: research, managers: research, regions },
   );
-  return { seed, research, desertParcels: ownedParcelsInRegion(s, 1), reachedAt: result.reachedAt, picks, produced, revenue, throttled, maxThrottleRun: maxRun };
+  return { seed, research, desertParcels: ownedParcelsInRegion(s, 1), shelfParcels: ownedParcelsInRegion(s, 2), platforms: countOf(s, 'platform'), reachedAt: result.reachedAt, picks, produced, revenue, throttled, maxThrottleRun: maxRun };
 }
 
 /** Среднее по минутам окна (a, b]. */
@@ -196,8 +198,8 @@ describe('метрики роста (отчёт вехи 0.4)', () => {
         out.push(`Выполнено на картах: V(170,180) ≥ 0,95·V(140,150) — ${ok((r) => V(r, 170, 180) >= 0.95 * V(r, 140, 150))} из 5.`);
         if (mode.regions)
           out.push(
-            `Регионы: «Нефтяная компания» / «Выход в пустыню», мин; участков пустыни к 180-й — ` +
-              runs.map((r) => `${r.seed}: ${min(r.reachedAt.cash_500k)} / ${min(r.reachedAt.desert)}, ${r.desertParcels}`).join('; '),
+            `Регионы: «Нефтяная компания» / «Выход в пустыню» / «Выход на шельф», мин; к 180-й участков пустыни / шельфа, платформ — ` +
+              runs.map((r) => `${r.seed}: ${min(r.reachedAt.cash_500k)} / ${min(r.reachedAt.desert)} / ${min(r.reachedAt.shelf)}, ${r.desertParcels} / ${r.shelfParcels}, ${r.platforms}`).join('; '),
           );
         out.push(`\nДоля качалок «ограничено трубой» (средняя по окну) и самый длинный отрезок подряд с долей > ${THROTTLE_SHARE * 100}%:`);
         out.push(
