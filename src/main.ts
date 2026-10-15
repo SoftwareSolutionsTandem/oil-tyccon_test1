@@ -7,6 +7,7 @@ import { Camera, worldToTile } from './render/iso';
 import { Renderer } from './render/renderer';
 import { duration, money, num } from './ui/format';
 import { Hud } from './ui/hud';
+import { detectPlatform, LocalPlatform, pickSave, type Platform } from './platform';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const camera = new Camera();
@@ -307,6 +308,78 @@ window.addEventListener('keyup', (e) => held.delete(e.key.toLowerCase()));
 window.addEventListener('blur', () => held.clear());
 window.addEventListener('resize', () => renderer.resize());
 
+// ——— Платформа (веха 0.5, этап 3): облачное сохранение, реклама, паузы ———
+
+let platform: Platform = new LocalPlatform();
+/** Причины паузы (платформа, реклама): игра стоит, пока есть хоть одна; скорость восстанавливается после последней. */
+const pauses = new Set<string>();
+let speedBeforePause = 1;
+/** Подписчики на паузу (звук, этап 5). */
+const pauseListeners: Array<(paused: boolean) => void> = [];
+
+function pause(reason: string): void {
+  if (pauses.has(reason)) return;
+  if (pauses.size === 0) {
+    speedBeforePause = game.speed;
+    game.speed = 0;
+    platform.gameplayStop();
+    for (const f of pauseListeners) f(true);
+  }
+  pauses.add(reason);
+}
+
+function resume(reason: string): void {
+  if (!pauses.delete(reason) || pauses.size > 0) return;
+  game.speed = speedBeforePause;
+  if (!document.hidden) platform.gameplayStart();
+  for (const f of pauseListeners) f(false);
+}
+
+function saveCloud(): void {
+  if (demo) return;
+  void platform.saveCloud(core.serialize(game.state));
+}
+
+/** Реклама за награду: пауза на время показа, деньги — только после подтверждения платформой. */
+function watchAd(): void {
+  if (!core.canClaimAdReward(game.state).ok) return;
+  platform.showRewardedAd({
+    onOpen: () => pause('ad'),
+    onRewarded: () => {
+      const r = core.claimAdReward(game.state);
+      if (r.ok) game.onToast(`Награда за рекламу: +${money(r.amount)}`, 'good');
+      save();
+    },
+    onClose: () => resume('ad'),
+    onError: () => game.onToast('Реклама сейчас недоступна', 'bad'),
+  });
+}
+
+// Платформа определяется в фоне: игра уже идёт с локальным сохранением; облачное берётся, если в нём больше
+// игрового времени (локальное остаётся запасным). Без SDK — всё как раньше.
+void detectPlatform().then(async (p) => {
+  platform = p;
+  p.onPause(() => pause('platform'));
+  p.onResume(() => resume('platform'));
+  if (!demo) {
+    const cloud = await p.loadCloud();
+    const pick = pickSave(JSON.stringify(game.state), cloud);
+    if (pick?.from === 'cloud') {
+      const st = core.deserialize(pick.json);
+      if (st) {
+        game.state = st;
+        game.selection = null;
+        renderer.adopt(st);
+        runOffline((Date.now() - st.savedAt) / 1000, 'Загружено облачное сохранение');
+        save();
+      }
+    }
+  }
+  p.ready();
+  if (pauses.size === 0 && !document.hidden) p.gameplayStart();
+  if (p.hasRewardedAds && !demo) hud.enableAds(watchAd);
+});
+
 // ——— Жизненный цикл: сохранение и фоновый режим ———
 
 let hiddenAt = 0;
@@ -314,9 +387,12 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     hiddenAt = Date.now();
     save();
+    saveCloud();
+    platform.gameplayStop();
   } else if (hiddenAt) {
     if (game.speed > 0) runOffline(((Date.now() - hiddenAt) / 1000) * game.speed, 'С возвращением');
     hiddenAt = 0;
+    if (pauses.size === 0) platform.gameplayStart();
   }
 });
 window.addEventListener('beforeunload', save);
@@ -327,6 +403,7 @@ let last = performance.now();
 let accumulator = 0;
 let uiTimer = 0;
 let saveTimer = 0;
+let cloudTimer = 0;
 const PAN_SPEED = 600;
 
 function frame(now: number): void {
@@ -381,6 +458,12 @@ function frame(now: number): void {
     uiTimer = 0;
     hud.update();
   }
+  // Облако — реже локального: раз в минуту и при сворачивании.
+  cloudTimer += dt;
+  if (cloudTimer > 60) {
+    cloudTimer = 0;
+    saveCloud();
+  }
   saveTimer += dt;
   if (saveTimer > 10) {
     saveTimer = 0;
@@ -426,4 +509,4 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
 }
 
 // Доступ из консоли браузера и автотестов (Playwright).
-Object.assign(window, { oilTycoon: { game, camera, renderer, core } });
+Object.assign(window, { oilTycoon: { game, camera, renderer, core, platform: () => platform, pauses, pauseListeners } });

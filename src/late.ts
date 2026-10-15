@@ -9,8 +9,8 @@ import type { GameState } from './core';
 export function createLateState(): GameState {
   const s = core.createNewGame(1);
   s.cash = 1e8;
-  s.unlocked = ['pumpjack', 'tank', 'terminal', 'refinery'];
-  s.features = ['research', 'loans', 'managers'];
+  s.unlocked = ['pumpjack', 'tank', 'terminal', 'refinery', 'platform'];
+  s.features = ['research', 'loans', 'managers', 'desert', 'shelf'];
   s.research.levels = { yield: 3, eor: 2, energy: 2, standard: 2 };
   s.objectiveIndex = core.OBJECTIVES.findIndex((o) => o.id === 'cash_500k');
   s.map.survey = s.map.survey.map(() => core.SURVEY_EXACT);
@@ -52,6 +52,29 @@ export function createLateState(): GameState {
       if (!core.build(s, 'pumpjack', x, y).ok) continue;
       const b = core.buildingAt(s, x, y)!;
       while (core.upgradeCost(b) !== null) core.upgrade(s, b.id);
+    }
+
+  // Шельф (веха 0.5): своя земля до южного края степи, два участка шельфа с наибольшими запасами,
+  // морские платформы 3-го уровня и резервуар на берегу напротив каждой.
+  const p0 = core.BASE_MAP_SIZE / core.PARCEL_SIZE;
+  const hqp = core.START_PARCEL;
+  for (let py = hqp.py + 1; py < p0; py++) core.buyParcel(s, hqp.px, py);
+  for (let k = 0; k < 2; k++) {
+    let best: { px: number; py: number; r: number } | null = null;
+    for (let px = 0; px < core.PARCELS_PER_SIDE; px++) {
+      if (!core.canBuyParcel(s, px, p0).ok) continue;
+      const r = core.parcelSurvey(s, px, p0).reserves;
+      if (!best || r > best.r) best = { px, py: p0, r };
+    }
+    if (best) core.buyParcel(s, best.px, best.py);
+  }
+  const n0 = s.map.size;
+  for (let y = core.BASE_MAP_SIZE; y < n0; y++)
+    for (let x = 0; x < n0; x++) {
+      if (!core.build(s, 'platform', x, y).ok) continue;
+      const b = core.buildingAt(s, x, y)!;
+      while (core.upgradeCost(b) !== null) core.upgrade(s, b.id);
+      for (let d = 0; d < 6; d++) if (core.build(s, 'tank', x + d, core.BASE_MAP_SIZE - 1).ok || core.build(s, 'tank', x - d, core.BASE_MAP_SIZE - 1).ok) break;
     }
 
   // Сеть: всё подключается магистралью — резервуары и терминалы сначала, затем качалки.

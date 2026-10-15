@@ -254,6 +254,33 @@ export class Hud {
     return panel;
   }
 
+  /**
+   * Кнопка рекламы за награду (веха 0.5, этап 3) — только на платформе с SDK. Награда выдаётся после
+   * подтверждения платформой (watch вызывает адаптер, деньги — core.claimAdReward).
+   */
+  private adButton: HTMLButtonElement | null = null;
+
+  enableAds(watch: () => void): void {
+    if (this.adButton) return;
+    const b = el('button', 'primary ad') as HTMLButtonElement;
+    b.dataset.role = 'ad';
+    b.onclick = () => watch();
+    this.adButton = b;
+    this.panels.finance.append(b);
+    this.updateAd();
+  }
+
+  private updateAd(): void {
+    const b = this.adButton;
+    if (!b) return;
+    const s = this.s;
+    const left = core.adCooldownLeft(s);
+    const reward = core.adReward(s);
+    b.disabled = !core.canClaimAdReward(s).ok;
+    b.textContent = left > 0 ? `Реклама за награду — через ${duration(left)}` : reward > 0 ? `Смотреть рекламу: +${money(reward)}` : 'Реклама за награду — нужна прибыль';
+    b.title = `Награда — ${core.AD_REWARD.minutes} мин операционной прибыли; не чаще раза в ${core.AD_REWARD.cooldownMinutes} мин игрового времени`;
+  }
+
   private buildRight(): HTMLElement {
     const right = el('div', 'right');
     const selection = el('div', 'panel selection', '<div class="info"></div><div class="actions"></div>');
@@ -291,6 +318,7 @@ export class Hud {
 
   update(): void {
     const s = this.s;
+    this.updateAd();
     const cap = core.storageCapacity(s);
     const minute = core.lastMinute(s);
     const profit = minute.revenue - minute.expenses;
@@ -532,6 +560,7 @@ export class Hud {
       kv('Всего вложено', money(t.capex)) +
       (s.features.includes('research') || t.research > 0 ? kv('Исследования', money(t.research)) : '') +
       (t.salaries > 0 ? kv('в т.ч. зарплаты (в расходах)', money(t.salaries)) : '') +
+      (t.adRewards > 0 ? kv('Награды за рекламу', money(t.adRewards)) : '') +
       (t.borrowed > 0 ? kv('Кредиты: получено / погашено', `${money(t.borrowed)} / ${money(t.repaid)}`) + kv('Проценты', money(t.interest)) : '') +
       `<div class="small" style="margin-top:6px">Вложения в строительство и землю — это инвестиции, они не входят в операционные расходы. Исследования тоже не входят и при сносе не возвращаются.</div>`;
   }
