@@ -9,28 +9,94 @@ const SIDES: ReadonlyArray<readonly [number, number]> = [
   [0, -1],
 ];
 
-/** Кратчайший путь по клеткам без зданий (кроме начала) от from к goal; null — пути нет. */
-function roadPath(n: number, blocked: Uint8Array, from: number, goal: number): number[] | null {
-  const prev = new Int32Array(n * n).fill(-2);
-  prev[from] = -1;
-  const queue = [from];
-  for (let q = 0; q < queue.length; q++) {
-    const i = queue[q];
-    if (i === goal) {
+/**
+ * Полоса дорог в клетке: участок вдоль x идёт по y + ROAD_Y, вдоль y — по x + ROAD_X. Так же стоит бензовоз под
+ * навесом терминала (models.truckMap), поэтому машина едет по середине дороги, а ломаная — строго по осям.
+ */
+export const ROAD_X = 0.5;
+export const ROAD_Y = 0.7;
+/** Штраф за поворот в поиске пути дороги, в клетках: дорога идёт прямо и поворачивает как можно реже. */
+const TURN_COST = 3;
+
+/**
+ * Путь дороги по клеткам без зданий (кроме начала) от from до любой свободной клетки ряда goalRow: кратчайший
+ * с учётом штрафа за повороты (Дейкстра по состояниям «клетка + направление»). Из начала — только вдоль x
+ * (машина стоит под навесом терминала вдоль x). null — пути нет.
+ */
+function roadPath(n: number, blocked: Uint8Array, from: number, goalRow: number, towardX: number): number[] | null {
+  const S = n * n * 4;
+  const dist = new Float64Array(S).fill(Infinity);
+  const prev = new Int32Array(S).fill(-1);
+  // Двоичная куча по стоимости: [стоимость, состояние].
+  const heap: Array<[number, number]> = [];
+  const push = (c: number, st: number) => {
+    heap.push([c, st]);
+    for (let i = heap.length - 1; i > 0; ) {
+      const p = (i - 1) >> 1;
+      if (heap[p][0] <= heap[i][0]) break;
+      [heap[p], heap[i]] = [heap[i], heap[p]];
+      i = p;
+    }
+  };
+  const pop = (): [number, number] => {
+    const top = heap[0];
+    const last = heap.pop()!;
+    if (heap.length) {
+      heap[0] = last;
+      for (let i = 0; ; ) {
+        const l = i * 2 + 1;
+        const r = l + 1;
+        let m = i;
+        if (l < heap.length && heap[l][0] < heap[m][0]) m = l;
+        if (r < heap.length && heap[r][0] < heap[m][0]) m = r;
+        if (m === i) break;
+        [heap[m], heap[i]] = [heap[i], heap[m]];
+        i = m;
+      }
+    }
+    return top;
+  };
+  const fx = from % n;
+  const fy = (from - fx) / n;
+  for (const d of [0, 1]) {
+    const nx = fx + SIDES[d][0];
+    if (nx < 0 || nx >= n) continue;
+    const j = fy * n + nx;
+    if (blocked[j]) continue;
+    const st = j * 4 + d;
+    // При равной длине дорога уходит от терминала в сторону конторы.
+    const c0 = Math.sign(SIDES[d][0]) === Math.sign(towardX - fx) ? 1 : 1.5;
+    dist[st] = c0;
+    prev[st] = -2; // шаг из начала
+    push(c0, st);
+  }
+  while (heap.length) {
+    const [c, st] = pop();
+    if (c > dist[st]) continue;
+    const cell = st >> 2;
+    const d = st & 3;
+    const x = cell % n;
+    const y = (cell - x) / n;
+    if (y === goalRow) {
       const out: number[] = [];
-      for (let t = i; t >= 0; t = prev[t]) out.push(t);
+      for (let s = st; s >= 0; s = prev[s]) out.push(s >> 2);
+      out.push(from);
       return out.reverse();
     }
-    const x = i % n;
-    const y = (i - x) / n;
-    for (const [dx, dy] of SIDES) {
-      const nx = x + dx;
-      const ny = y + dy;
+    for (let nd = 0; nd < 4; nd++) {
+      if ((nd ^ 1) === d && (nd >> 1) === (d >> 1)) continue; // без разворота
+      const nx = x + SIDES[nd][0];
+      const ny = y + SIDES[nd][1];
       if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
       const j = ny * n + nx;
-      if (prev[j] !== -2 || (blocked[j] && j !== goal)) continue;
-      prev[j] = i;
-      queue.push(j);
+      if (blocked[j]) continue;
+      const ns = j * 4 + nd;
+      const nc = c + 1 + (nd === d ? 0 : TURN_COST);
+      if (nc < dist[ns]) {
+        dist[ns] = nc;
+        prev[ns] = st;
+        push(nc, ns);
+      }
     }
   }
   return null;
@@ -59,6 +125,7 @@ export class GroundDecals {
   private concrete: CanvasPattern;
   private routesKey = '';
   private roads: Array<Array<[number, number]>> = [];
+  private truckRoutes = new Map<number, Array<[number, number]>>();
 
   constructor(ctx: CanvasRenderingContext2D) {
     const scale = new DOMMatrix().scale(1 / TEX_PATTERN, 1 / TEX_PATTERN);
@@ -100,24 +167,42 @@ export class GroundDecals {
     const key = s.buildings.map((b) => `${b.id}:${b.type}:${b.x}:${b.y}`).join('|');
     if (key === this.routesKey) return;
     this.routesKey = key;
+    this.truckRoutes.clear();
     const n = s.map.size;
     const hq = s.buildings.find((b) => b.type === 'hq');
     const hx = hq ? hq.x : HQ_POS.x;
     const hy = hq ? hq.y : HQ_POS.y;
-    const front: [number, number] = [hx + 0.42, hy + 1.1];
-    this.roads = [[[-1, hy + 1.1], front]];
+    // Главная дорога — ряд перед конторой (с «большой земли» с запада), подъезд — от двери конторы вниз к ней.
+    const row = hy + 1;
+    const laneY = row + ROAD_Y;
+    const edge: [number, number] = [-1.5, laneY];
     const blocked = new Uint8Array(n * n);
     for (const b of s.buildings) blocked[b.y * n + b.x] = 1;
-    const goal = (hy + 1) * n + hx;
+    let east = hx;
+    const branches: Array<Array<[number, number]>> = [];
     for (const b of s.buildings) {
       if (b.type !== 'terminal') continue;
-      const path = roadPath(n, blocked, b.y * n + b.x, goal);
+      const path = roadPath(n, blocked, b.y * n + b.x, row, hx);
       if (!path) continue;
-      const pts: Array<[number, number]> = [[b.x + 0.5, b.y + 0.72]];
-      for (let k = 1; k < path.length - 1; k++) pts.push([(path[k] % n) + 0.5, Math.floor(path[k] / n) + 0.72]);
-      pts.push([front[0], front[1]]);
-      this.roads.push(simplify(pts));
+      const pts = simplify(path.map((i) => [(i % n) + ROAD_X, Math.floor(i / n) + ROAD_Y] as [number, number]));
+      const [jx] = pts[pts.length - 1];
+      east = Math.max(east, Math.floor(jx));
+      branches.push(pts);
+      // Бензовоз: по своей дороге до главной, по ней — на запад за край карты.
+      this.truckRoutes.set(b.id, simplify([...pts, edge]));
     }
+    const driveway: Array<[number, number]> = [
+      [hx + ROAD_X, hy + 0.95],
+      [hx + ROAD_X, laneY],
+    ];
+    this.truckRoutes.set(hq?.id ?? 0, simplify([...driveway, edge]));
+    this.roads = [[[-1, laneY], [east + ROAD_X, laneY]], driveway, ...branches];
+  }
+
+  /** Путь бензовоза от здания (терминал или контора) по дорогам за край карты, в клетках; null — дороги нет. */
+  truckRoute(s: GameState, id: number): Array<[number, number]> | null {
+    this.updateRoutes(s);
+    return this.truckRoutes.get(id) ?? null;
   }
 
   drawRoads(ctx: CanvasRenderingContext2D, s: GameState): void {

@@ -20,11 +20,11 @@ import {
   type GameState,
 } from '../core';
 import { Environment, HAZE_CSS } from './environment';
-import { GroundDecals } from './ground';
+import { GroundDecals, ROAD_X, ROAD_Y } from './ground';
 import { Camera, isoX, isoY, worldToTile } from './iso';
 import { proj, type ShadowShape, type Sprite } from './model';
 import { mipmap, mipmapBytes, mipmapFrame } from './mipmap';
-import { HQ_FLAG_TOP, HQ_WINDOWS, LIGHTS, pumpExhaust, REFINERY_COLUMN_TOP, REFINERY_STACK_TOP, tankDims, tankGauge, TRUCK_DUST, TRUCK_EXHAUST, TRUCK_LENGTH } from './models';
+import { HQ_FLAG_TOP, HQ_WINDOWS, LIGHTS, pumpExhaust, REFINERY_COLUMN_TOP, REFINERY_STACK_TOP, tankDims, tankGauge, TRUCK_DUST, TRUCK_EXHAUST, TRUCK_LENGTH, truckMap, type TruckDir } from './models';
 import { ParticleSystem } from './particles';
 import { createCanvas, hash2 } from './noise';
 import { SpriteLibrary } from './sprites';
@@ -60,6 +60,9 @@ interface DrawItem {
 
 const POP_TIME = 0.35;
 const TRUCK_LOAD = 0.55;
+/** Сколько клеток дороги видно, как бензовоз уезжает (дальше растворяется), и время выезда перекупщика, с. */
+const TRUCK_DRIVE = 12;
+const HQ_TRUCK_TIME = 3;
 /** Матрица проекции земли: клетки → пиксели мира. */
 const GROUND: [number, number, number, number, number, number] = [32, 16, -32, 16, 0, 0];
 const SHADOW_ALPHA = 0.5;
@@ -121,8 +124,9 @@ export class Renderer {
   private guideKey = '';
   private guides: Array<[number, number, number]> = [];
   private truckT = new Map<number, number>();
+  /** Состояние текущего кадра (пути бензовозов в частях зданий). */
+  private frameState: GameState | null = null;
   /** Направление выезда машин (обновляется раз в кадр по соседним зданиям). */
-  private exitDirs = new Map<number, 1 | -1 | 0>();
   private terminalCash = new Map<number, number>();
   private bornAt = new Map<number, number>();
   private floats: FloatText[] = [];
@@ -218,6 +222,7 @@ export class Renderer {
   draw(s: GameState, view: ViewState, dt: number, speed: number): void {
     const t0 = performance.now();
     this.clock += dt;
+    this.frameState = s;
     if (!this.terrain || this.terrain.seed !== s.seed) this.adopt(s);
     const simDt = dt * speed;
     const { ctx } = this;
@@ -251,8 +256,7 @@ export class Renderer {
     this.updateOrients(s, view);
     for (const b of s.buildings) {
       if (!this.bornAt.has(b.id)) this.bornAt.set(b.id, this.clock);
-      if (b.type === 'terminal' || b.type === 'hq') this.exitDirs.set(b.id, this.exitDir(s, b));
-      this.animate(b, simDt);
+      this.animate(s, b, simDt);
     }
     this.particles.update(simDt);
     const items = this.collectItems(s, view);
@@ -829,7 +833,11 @@ export class Renderer {
       // Уровень в резервуаре — его собственный запас (нефть хранится по месту).
       const own = b.type === 'tank' || b.type === 'hq' ? Math.min(1, (b.stored ?? 0) / Math.max(1, levelSpec(b).value)) : fill;
       items.push(this.buildingItem(b, own));
-      if (b.type === 'hq') items.push(this.hqTrucksItem(b));
+      if (b.type === 'hq') items.push(this.hqTrucksItem(s, b));
+      if (b.type === 'terminal') {
+        const moving = this.terminalTruck(s, b);
+        if (moving && !moving.loading) items.push(this.truckItem(moving));
+      }
     }
     for (let i = 0; i < s.map.decor.length; i++) {
       const kind = s.map.decor[i];
@@ -887,8 +895,7 @@ export class Renderer {
           this.castShadow(this.sprites.pumpjack(b.level, this.pumpPhase.get(b.id) ?? hash2(b.x, b.y, 1) * 6, this.orientOf(b)).shadows, b.x, b.y);
           return;
         }
-        const truck = b.type === 'terminal' ? this.truckOffset(b) : null;
-        if (truck && truck.dx !== 0) this.castShadow(this.truckSprite(truck.dir).shadows, b.x + truck.dx, b.y);
+        // Стоящий под навесом бензовоз запечён в тень земли; едущий отбрасывает тень своим предметом (truckItem).
       },
     };
   }
@@ -925,15 +932,12 @@ export class Renderer {
       case 'hq':
         return [() => this.blit(lib.headquarters(), x, y), () => this.drawFlag(b)];
       case 'terminal': {
-        const truck = this.truckOffset(b);
+        const truck = this.frameState ? this.terminalTruck(this.frameState, b) : null;
         return [
           () => this.blit(lib.terminalBack(b.level), x, y),
           () => {
-            if (!truck) return;
-            this.ctx.save();
-            this.ctx.globalAlpha *= truck.alpha;
-            this.blit(this.truckSprite(truck.dir), x + truck.dx, y);
-            this.ctx.restore();
+            if (!truck?.loading) return;
+            this.blit(this.sprites.truckDir(truck.dir), truck.ox, truck.oy);
           },
           () => this.blit(lib.terminalFront(b.level), x, y),
         ];
@@ -942,54 +946,88 @@ export class Renderer {
   }
 
   /**
-   * Куда уезжает машина от здания: вдоль оси x туда, где две клетки свободны от зданий
-   * (сначала вперёд, иначе назад); если заперта с обеих сторон — растворяется на месте.
+   * Положение бензовоза на пути по дороге (ground.ts truckRoute): точка в d клетках от начала ломаной.
+   * Направление — по участку пути (на повороте машина поворачивает); ox, oy — начало модели для blit.
    */
-  private exitDir(s: GameState, b: Building): 1 | -1 | 0 {
-    const free = (x: number) => x >= 0 && x < s.map.size && !s.buildings.some((o) => o.x === x && o.y === b.y);
-    if (free(b.x + 1) && free(b.x + 2)) return 1;
-    if (free(b.x - 1) && free(b.x - 2)) return -1;
-    return 0;
+  private truckPose(route: Array<[number, number]>, d: number): { ox: number; oy: number; dir: TruckDir; x: number; y: number } {
+    let i = 0;
+    let rest = d;
+    for (; i < route.length - 2; i++) {
+      const len = Math.abs(route[i + 1][0] - route[i][0]) + Math.abs(route[i + 1][1] - route[i][1]);
+      if (rest <= len) break;
+      rest -= len;
+    }
+    const [ax, ay] = route[i];
+    const [bx, by] = route[i + 1] ?? route[i];
+    const len = Math.abs(bx - ax) + Math.abs(by - ay) || 1;
+    const k = Math.min(1, rest / len);
+    const x = ax + (bx - ax) * k;
+    const y = ay + (by - ay) * k;
+    const dir: TruckDir = Math.abs(bx - ax) >= Math.abs(by - ay) ? (bx >= ax ? '+x' : '-x') : by >= ay ? '+y' : '-y';
+    // Середина модели: вдоль x — (u = L/2, y = 0,7), вдоль y — (x = 0,5, u = L/2) — см. models.truckMap.
+    const half = TRUCK_LENGTH / 2;
+    return dir === '+x' || dir === '-x' ? { ox: x - half, oy: y - ROAD_Y, dir, x, y } : { ox: x - ROAD_X, oy: y - half, dir, x, y };
   }
 
-  private truckOffset(b: Building): { dx: number; alpha: number; dir: 1 | -1 } | null {
-    const dir = this.exitDirs.get(b.id) ?? 1;
-    if (b.id < 0) return { dx: 0, alpha: 1, dir: 1 };
-    const t = this.truckT.get(b.id) ?? 0;
-    if (t < TRUCK_LOAD) return { dx: 0, alpha: 1, dir: dir === -1 ? -1 : 1 };
+  private routeLength(route: Array<[number, number]>): number {
+    let len = 0;
+    for (let i = 1; i < route.length; i++) len += Math.abs(route[i][0] - route[i - 1][0]) + Math.abs(route[i][1] - route[i - 1][1]);
+    return len;
+  }
+
+  /**
+   * Бензовоз терминала: грузится под навесом, затем едет по своей дороге к главной и по ней — на запад за край карты
+   * (последние метры видимого пути растворяется). Без дороги — растворяется на месте.
+   */
+  private terminalTruck(s: GameState, b: Building): (ReturnType<Renderer['truckPose']> & { loading: boolean; alpha: number }) | null {
+    const raw = b.id >= 0 ? this.decals.truckRoute(s, b.id) : null;
+    // Под навесом машина стоит серединой на x + L/2 (как раньше), дальше — по дороге.
+    const route: Array<[number, number]> = raw ? [[b.x + TRUCK_LENGTH / 2, b.y + ROAD_Y], ...raw.slice(1)] : [[b.x + TRUCK_LENGTH / 2, b.y + ROAD_Y], [b.x + 1, b.y + ROAD_Y]];
+    const t = b.id < 0 ? 0 : (this.truckT.get(b.id) ?? 0);
+    if (t < TRUCK_LOAD) return { ...this.truckPose(route, 0), loading: true, alpha: 1 };
     const k = (t - TRUCK_LOAD) / (1 - TRUCK_LOAD);
     if (k > 0.98) return null;
-    if (dir === 0) return { dx: 0, alpha: Math.max(0, 1 - k * 3), dir: 1 };
-    return { dx: dir * k * k * 2.4, alpha: Math.min(1, (1 - k) * 2.5), dir };
+    if (!raw) return { ...this.truckPose(route, 0), loading: false, alpha: Math.max(0, 1 - k * 3) };
+    const span = Math.min(TRUCK_DRIVE, this.routeLength(route));
+    return { ...this.truckPose(route, k * k * span), loading: false, alpha: Math.min(1, (1 - k) * 4) };
   }
 
-  private truckSprite(dir: 1 | -1): Sprite {
-    return dir === 1 ? this.sprites.truck() : this.sprites.truckReverse();
+  /** Едущий бензовоз — отдельный предмет со своей глубиной и тенью. */
+  private truckItem(p: { ox: number; oy: number; dir: TruckDir; x: number; y: number; alpha: number }): DrawItem {
+    const sprite = this.sprites.truckDir(p.dir);
+    return {
+      order: p.x + p.y,
+      draw: () => {
+        this.ctx.save();
+        this.ctx.globalAlpha = p.alpha;
+        this.blit(sprite, p.ox, p.oy);
+        this.ctx.restore();
+      },
+      shadows: () => this.castShadow(sprite.shadows, p.ox, p.oy),
+    };
   }
 
-  private hqTrucksItem(b: Building): DrawItem {
-    this.hqTrucks = this.hqTrucks.filter((start) => this.clock - start < 2.5);
-    const dir = this.exitDirs.get(b.id) ?? 1;
-    // Грузовик перекупщика: уезжает по свободной стороне или растворяется у конторы.
-    const trucks = this.hqTrucks.map((start) => {
-      const k = (this.clock - start) / 2.5;
-      const sprite = this.truckSprite(dir === -1 ? -1 : 1);
-      const x = dir === 0 ? b.x + 0.4 : b.x + 0.4 * dir + dir * k * k * 3;
-      const alpha = dir === 0 ? Math.max(0, 1 - k * 3) : Math.min(1, (1 - k) * 2.5);
-      return { sprite, x, alpha };
+  /** Грузовики перекупщика (ручная продажа): от двери конторы по подъезду к главной дороге и по ней — на запад. */
+  private hqTrucksPoses(s: GameState, b: Building): Array<ReturnType<Renderer['truckPose']> & { alpha: number; k: number }> {
+    this.hqTrucks = this.hqTrucks.filter((start) => this.clock - start < HQ_TRUCK_TIME);
+    const route = this.decals.truckRoute(s, b.id);
+    if (!route) return [];
+    const span = Math.min(TRUCK_DRIVE, this.routeLength(route) - 0.3);
+    return this.hqTrucks.map((start) => {
+      const k = (this.clock - start) / HQ_TRUCK_TIME;
+      return { ...this.truckPose(route, 0.3 + k * k * span), alpha: Math.min(1, (1 - k) * 4), k };
     });
+  }
+
+  private hqTrucksItem(s: GameState, b: Building): DrawItem {
+    const items = this.hqTrucksPoses(s, b).map((p) => this.truckItem(p));
     return {
       order: b.x + b.y + 1.2,
       draw: () => {
-        for (const t of trucks) {
-          this.ctx.save();
-          this.ctx.globalAlpha = t.alpha;
-          this.blit(t.sprite, t.x, b.y + 0.35);
-          this.ctx.restore();
-        }
+        for (const it of items) it.draw();
       },
       shadows: () => {
-        for (const t of trucks) this.castShadow(t.sprite.shadows, t.x, b.y + 0.35);
+        for (const it of items) it.shadows?.();
       },
     };
   }
@@ -1000,7 +1038,7 @@ export class Renderer {
     this.ctx.drawImage(mipmap(sp.canvas, ratio), isoX(x, y) + sp.ox, isoY(x, y) + sp.oy, sp.w, sp.h);
   }
 
-  private animate(b: Building, simDt: number): void {
+  private animate(s: GameState, b: Building, simDt: number): void {
     if (b.type === 'pumpjack' && (b.status === 'ok' || b.status === 'throttled')) {
       const before = this.pumpPhase.get(b.id) ?? hash2(b.x, b.y, 1) * 6;
       const after = before + simDt * (1.7 + 0.35 * b.level);
@@ -1013,7 +1051,7 @@ export class Renderer {
         if (Math.floor(after / Math.PI) !== Math.floor(before / Math.PI)) this.particles.spawn(1, at, { size: 2.4, alpha: 0.9 });
       }
     }
-    if (b.type === 'hq') this.emitHqTrucks(b, simDt);
+    if (b.type === 'hq') this.emitHqTrucks(s, b, simDt);
     if (b.type === 'refinery' && (b.status === 'ok' || b.status === 'throttled') && simDt > 0) {
       // Работающий НПЗ: дым печи и пар над колонной (те же частицы выхлопа, что и у машин).
       this.particles.emit(1, [b.x + REFINERY_STACK_TOP[0], b.y + REFINERY_STACK_TOP[1], REFINERY_STACK_TOP[2]], 2.5, simDt, { size: 2.2, alpha: 0.6 });
@@ -1031,34 +1069,29 @@ export class Renderer {
         this.terminalCash.set(b.id, 0);
       }
       this.truckT.set(b.id, t);
-      const truck = this.truckOffset(b);
+      const truck = this.terminalTruck(s, b);
       if (truck && simDt > 0) {
-        const moving = t >= TRUCK_LOAD;
+        const moving = !truck.loading;
         const speed = moving ? (t - TRUCK_LOAD) / (1 - TRUCK_LOAD) : 0;
-        const dust = truckPoint(TRUCK_DUST, truck.dir);
-        const exhaust = truckPoint(TRUCK_EXHAUST, truck.dir);
-        if (moving && truck.dx !== 0) this.particles.emit(0, [b.x + truck.dx + dust[0], b.y + dust[1], dust[2]], 10 + 40 * speed, simDt, { vx: -0.3 * truck.dir });
-        if (moving || b.status === 'ok') {
-          this.particles.emit(1, [b.x + truck.dx + exhaust[0], b.y + exhaust[1], exhaust[2]], moving ? 7 : 2, simDt);
-        }
+        const m = truckMap(truck.dir);
+        const dust = m(TRUCK_DUST);
+        const exhaust = m(TRUCK_EXHAUST);
+        if (moving) this.particles.emit(0, [truck.ox + dust[0], truck.oy + dust[1], dust[2]], 10 + 40 * speed, simDt);
+        if (moving || b.status === 'ok') this.particles.emit(1, [truck.ox + exhaust[0], truck.oy + exhaust[1], exhaust[2]], moving ? 7 : 2, simDt);
       }
     }
   }
 
-  /** Пыль и выхлоп грузовиков перекупщика, уезжающих от конторы. */
-  private emitHqTrucks(b: Building, simDt: number): void {
+  /** Пыль и выхлоп грузовиков перекупщика, уезжающих от конторы по дороге. */
+  private emitHqTrucks(s: GameState, b: Building, simDt: number): void {
     if (simDt <= 0) return;
-    const dir = this.exitDirs.get(b.id) ?? 1;
-    if (dir === 0) return;
-    const dust = truckPoint(TRUCK_DUST, dir);
-    const exhaust = truckPoint(TRUCK_EXHAUST, dir);
-    for (const start of this.hqTrucks) {
-      const k = (this.clock - start) / 2.5;
-      if (k < 0 || k >= 1) continue;
-      const x = b.x + 0.4 * dir + dir * k * k * 3;
-      const y = b.y + 0.35;
-      this.particles.emit(0, [x + dust[0], y + dust[1], dust[2]], 15 + 40 * k, simDt, { vx: -0.3 * dir });
-      this.particles.emit(1, [x + exhaust[0], y + exhaust[1], exhaust[2]], 7, simDt);
+    for (const p of this.hqTrucksPoses(s, b)) {
+      if (p.k < 0 || p.k >= 1) continue;
+      const m = truckMap(p.dir);
+      const dust = m(TRUCK_DUST);
+      const exhaust = m(TRUCK_EXHAUST);
+      this.particles.emit(0, [p.ox + dust[0], p.oy + dust[1], dust[2]], 15 + 40 * p.k, simDt);
+      this.particles.emit(1, [p.ox + exhaust[0], p.oy + exhaust[1], exhaust[2]], 7, simDt);
     }
   }
 
@@ -1159,13 +1192,21 @@ export class Renderer {
       }
     }
     // Фары уезжающих бензовозов.
+    const trucks: Array<{ ox: number; oy: number; dir: TruckDir; alpha: number }> = [];
     for (const b of s.buildings) {
-      if (b.type !== 'terminal') continue;
-      const truck = this.truckOffset(b);
-      if (!truck || truck.dx === 0) continue;
-      const front = truck.dir === 1 ? 0.64 : TRUCK_LENGTH - 0.64;
-      for (const y of [0.64, 0.76]) glow(this.glowWarm, [b.x + truck.dx + front, b.y + y, 0.12], 5, 5, 0.9 * truck.alpha);
-      glow(this.glowWarm, [b.x + truck.dx + front + 0.45 * truck.dir, b.y + 0.7, 0], 26, 12, 0.4 * truck.alpha);
+      if (b.type === 'terminal') {
+        const truck = this.terminalTruck(s, b);
+        if (truck && !truck.loading) trucks.push(truck);
+      } else if (b.type === 'hq') trucks.push(...this.hqTrucksPoses(s, b));
+    }
+    for (const tr of trucks) {
+      const m = truckMap(tr.dir);
+      for (const v of [0.64, 0.76]) {
+        const [x, y, z] = m([0.64, v, 0.12]);
+        glow(this.glowWarm, [tr.ox + x, tr.oy + y, z], 5, 5, 0.9 * tr.alpha);
+      }
+      const [x, y] = m([1.09, 0.7, 0]);
+      glow(this.glowWarm, [tr.ox + x, tr.oy + y, 0], 26, 12, 0.4 * tr.alpha);
     }
     ctx.restore();
   }
@@ -1337,9 +1378,6 @@ function bakeShadow(shapes: ShadowShape[]): ShadowSprite {
 }
 
 /** Точка на модели бензовоза с учётом разворота (зеркально по x относительно кузова). */
-function truckPoint(p: readonly [number, number, number], dir: 1 | -1): [number, number, number] {
-  return dir === 1 ? [p[0], p[1], p[2]] : [TRUCK_LENGTH - p[0], p[1], p[2]];
-}
 
 /** Мягкое световое пятно для аддитивного смешивания. */
 function makeGlow(rgb: [number, number, number]): HTMLCanvasElement {

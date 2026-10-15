@@ -60,6 +60,13 @@ export class SpriteLibrary {
     return this.get('truck', () => this.bake((p) => models.truck(p), this.grime, 0.35));
   }
 
+  /** Бензовоз в направлении движения (для езды по дорогам). */
+  truckDir(dir: models.TruckDir): Sprite {
+    if (dir === '+x') return this.truck();
+    if (dir === '-x') return this.truckReverse();
+    return this.get(`truck${dir}`, () => this.bake((p) => models.truckDir(p, dir), this.grime, 0.35));
+  }
+
   truckReverse(): Sprite {
     return this.get('truckR', () => this.bake((p) => models.truckReverse(p), this.grime, 0.35));
   }

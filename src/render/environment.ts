@@ -1,5 +1,5 @@
 import { BASE_MAP_SIZE, HQ_POS, MAP_OFFSET, type GameState } from '../core';
-import type { GroundDecals } from './ground';
+import { ROAD_Y, type GroundDecals } from './ground';
 import { mipmap } from './mipmap';
 import { isoX, isoY } from './iso';
 import { bakeSprite, MATERIALS as M, mat, type ModelPainter, type RGB, type Sprite, type V3 } from './model';
@@ -111,7 +111,8 @@ export class Environment {
       // Дорога вдоль западного края идёт до берега шельфа (MAP_OFFSET.y + BASE_MAP_SIZE), в море её нет.
       [[-12, -FAR], [-12, MAP_OFFSET.y + BASE_MAP_SIZE - 3]],
       [[-FAR, -11], [n + FAR, -11]],
-      [[-12, HQ_POS.y + 1.1], [0, HQ_POS.y + 1.1]],
+      // Съезд к конторе — продолжение главной дороги карты (полоса ROAD_Y ряда перед конторой, ground.ts).
+      [[-12, HQ_POS.y + 1 + ROAD_Y], [0, HQ_POS.y + 1 + ROAD_Y]],
     ];
     this.buildLandmarks();
   }

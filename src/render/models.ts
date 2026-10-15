@@ -325,7 +325,6 @@ export const TRUCK_EXHAUST: V3 = [0.47, 0.6, 0.38];
 export const TRUCK_LENGTH = 0.65;
 export const TRUCK_DUST: V3 = [0.04, 0.7, 0.02];
 
-/** Бензовоз, развёрнутый кабиной к −x (для выезда назад). Зеркалим по x: передние/задние детали меняются местами. */
 /** Окраска поясов мини-резервуаров НПЗ по продуктам: бензин, дизель, мазут. */
 const PRODUCT_BANDS: Material[] = [mat([214, 170, 40], 0.3, 20), mat([170, 52, 40], 0.3, 20), mat([46, 44, 42], 0.2, 14)];
 
@@ -448,31 +447,83 @@ export function platform(p: ModelPainter, level: number): void {
   }
 }
 
+/** Направление движения бензовоза по карте: кабиной к +x, −x, +y или −y. */
+export type TruckDir = '+x' | '-x' | '+y' | '-y';
+
+/**
+ * Перевод из системы модели бензовоза (u — вдоль, от задка 0 к кабине TRUCK_LENGTH; v — поперёк, полоса 0,6–0,8;
+ * z — вверх) в координаты клетки для направления dir. Вдоль x полоса — y = 0,7 в клетке, вдоль y — x = 0,5:
+ * так стоят дороги (ground.ts) и навес терминала.
+ */
+export function truckMap(dir: TruckDir): (p: readonly [number, number, number]) => V3 {
+  const L = TRUCK_LENGTH;
+  switch (dir) {
+    case '+x':
+      return ([u, v, z]) => [u, v, z];
+    case '-x':
+      return ([u, v, z]) => [L - u, v, z];
+    case '+y':
+      return ([u, v, z]) => [v - 0.2, u, z];
+    case '-y':
+      return ([u, v, z]) => [v - 0.2, L - u, z];
+  }
+}
+
+/** Нормаль грани в системе модели → в координатах клетки (поворот на 90° или отражение). */
+function truckNormal(dir: TruckDir, [nu, nv, nz]: V3): V3 {
+  return dir === '+x' ? [nu, nv, nz] : dir === '-x' ? [-nu, nv, nz] : dir === '+y' ? [nv, nu, nz] : [nv, -nu, nz];
+}
+
+/**
+ * Бензовоз в любом из четырёх направлений — одна модель, повёрнутая на 90° или отражённая. Порядок рисования —
+ * от дальних деталей к ближним: при кабине к зрителю (+x, +y) кабина рисуется после цистерны, при кабине от
+ * зрителя (−x, −y) — до неё.
+ */
+export function truckDir(p: ModelPainter, dir: TruckDir): void {
+  const m = truckMap(dir);
+  const box = (u0: number, v0: number, z0: number, u1: number, v1: number, z1: number, mat: Material) => {
+    const a = m([u0, v0, z0]);
+    const b = m([u1, v1, z1]);
+    p.box(Math.min(a[0], b[0]), Math.min(a[1], b[1]), z0, Math.max(a[0], b[0]), Math.max(a[1], b[1]), z1, mat);
+  };
+  const tube = (a: V3, b: V3, r: number, mat: Material, seg: number) => p.tube(m(a), m(b), r, mat, seg);
+  const face = (pts: V3[], mat: Material, n: V3) => p.face(pts.map(m), mat, truckNormal(dir, n));
+  const wheels = (v: number) => {
+    for (const u of [0.1, 0.21, 0.5]) tube([u, v, 0.06], [u, v + 0.04, 0.06], 0.058, M.rubber, 10);
+  };
+  const cab = () => {
+    box(0.47, 0.6, 0.08, 0.61, 0.8, 0.3, M.red);
+    face([[0.611, 0.63, 0.19], [0.611, 0.77, 0.19], [0.611, 0.77, 0.28], [0.611, 0.63, 0.28]], M.glass, [1, 0, 0]);
+    face([[0.5, 0.801, 0.19], [0.58, 0.801, 0.19], [0.58, 0.801, 0.28], [0.5, 0.801, 0.28]], M.glass, [0, 1, 0]);
+  };
+  const tank = () => {
+    tube([0.03, 0.7, 0.23], [0.45, 0.7, 0.23], 0.11, M.aluminium, 18);
+    box(0.06, 0.67, 0.33, 0.42, 0.73, 0.345, M.steelDark);
+  };
+  wheels(0.6);
+  box(0.02, 0.62, 0.07, 0.6, 0.78, 0.12, M.steelDark);
+  if (dir === '+x' || dir === '+y') {
+    tank();
+    cab();
+    box(0.6, 0.6, 0.07, 0.63, 0.8, 0.12, M.steel);
+    tube([0.47, 0.6, 0.12], TRUCK_EXHAUST, 0.012, M.steel, 6);
+  } else {
+    box(0.6, 0.6, 0.07, 0.63, 0.8, 0.12, M.steel);
+    cab();
+    tube([0.47, 0.6, 0.12], TRUCK_EXHAUST, 0.012, M.steel, 6);
+    tank();
+  }
+  wheels(0.78);
+}
+
+/** Бензовоз, развёрнутый кабиной к −x (для выезда назад). */
 export function truckReverse(p: ModelPainter): void {
-  const X = (x: number) => TRUCK_LENGTH - x;
-  for (const x of [0.1, 0.21, 0.5]) p.tube([X(x), 0.6, 0.06], [X(x), 0.64, 0.06], 0.058, M.rubber, 10);
-  p.box(X(0.6), 0.62, 0.07, X(0.02), 0.78, 0.12, M.steelDark);
-  p.box(X(0.63), 0.6, 0.07, X(0.6), 0.8, 0.12, M.steel);
-  p.box(X(0.61), 0.6, 0.08, X(0.47), 0.8, 0.3, M.red);
-  p.face([[X(0.58), 0.801, 0.19], [X(0.5), 0.801, 0.19], [X(0.5), 0.801, 0.28], [X(0.58), 0.801, 0.28]], M.glass, [0, 1, 0]);
-  p.tube([X(0.47), 0.6, 0.12], [X(0.47), 0.6, 0.38], 0.012, M.steel, 6);
-  p.tube([X(0.45), 0.7, 0.23], [X(0.03), 0.7, 0.23], 0.11, M.aluminium, 18);
-  p.box(X(0.42), 0.67, 0.33, X(0.06), 0.73, 0.345, M.steelDark);
-  for (const x of [0.1, 0.21, 0.5]) p.tube([X(x), 0.78, 0.06], [X(x), 0.82, 0.06], 0.058, M.rubber, 10);
+  truckDir(p, '-x');
 }
 
 /** Бензовоз, ориентирован вдоль оси x. */
 export function truck(p: ModelPainter): void {
-  for (const x of [0.1, 0.21, 0.5]) p.tube([x, 0.6, 0.06], [x, 0.64, 0.06], 0.058, M.rubber, 10);
-  p.box(0.02, 0.62, 0.07, 0.6, 0.78, 0.12, M.steelDark);
-  p.tube([0.03, 0.7, 0.23], [0.45, 0.7, 0.23], 0.11, M.aluminium, 18);
-  p.box(0.06, 0.67, 0.33, 0.42, 0.73, 0.345, M.steelDark);
-  p.box(0.47, 0.6, 0.08, 0.61, 0.8, 0.3, M.red);
-  p.face([[0.611, 0.63, 0.19], [0.611, 0.77, 0.19], [0.611, 0.77, 0.28], [0.611, 0.63, 0.28]], M.glass, [1, 0, 0]);
-  p.face([[0.5, 0.801, 0.19], [0.58, 0.801, 0.19], [0.58, 0.801, 0.28], [0.5, 0.801, 0.28]], M.glass, [0, 1, 0]);
-  p.box(0.6, 0.6, 0.07, 0.63, 0.8, 0.12, M.steel);
-  p.tube([0.47, 0.6, 0.12], TRUCK_EXHAUST, 0.012, M.steel, 6);
-  for (const x of [0.1, 0.21, 0.5]) p.tube([x, 0.78, 0.06], [x, 0.82, 0.06], 0.058, M.rubber, 10);
+  truckDir(p, '+x');
 }
 
 /** Окна конторы (нужны и модели, и ночной подсветке). */
