@@ -157,6 +157,42 @@ function clearPendingBuild(): void {
   hud.showBuildConfirm(null, false, () => {}, () => {});
 }
 
+/**
+ * Труба касаниями (узкий экран): протяжка пальцем двигала бы камеру, поэтому первое касание — начало трубы,
+ * второе — конец; дальше — подтверждение с длиной и ценой (или возвратом при демонтаже).
+ */
+function tapPipe(x: number, y: number): void {
+  if (!game.pipeStart) {
+    game.pipeDown(x, y);
+    game.hover = { x, y };
+    return;
+  }
+  game.hover = { x, y };
+  const p = game.pipePreview();
+  if (!p) return;
+  const text = p.ok ? (p.tool === 'unpipe' ? `Демонтаж: ${p.count} кл. · +${money(p.cost)}` : `Труба: ${p.count} кл. · ${money(p.cost)}`) : (p.reason ?? 'Нельзя');
+  pendingBuild = { x, y };
+  hud.showBuildConfirm(
+    text,
+    p.ok,
+    () => {
+      game.pipeUp(x, y);
+      clearPendingBuild();
+      hud.update();
+    },
+    () => {
+      game.pipeStart = null;
+      clearPendingBuild();
+      game.hover = null;
+    },
+    p.tool === 'unpipe' ? 'Убрать ✓' : 'Проложить ✓',
+  );
+}
+hud.onModeCancel = () => {
+  clearPendingBuild();
+  game.hover = null;
+};
+
 /** Касание в режиме стройки: здание не ставится сразу — сначала подтверждение (палец не строит при прокрутке). */
 function proposeBuild(x: number, y: number): void {
   const type = game.mode;
@@ -196,7 +232,7 @@ canvas.addEventListener('pointerdown', (e) => {
       return;
     }
   }
-  if (e.button === 0 && isPipeTool(game.mode)) {
+  if (e.button === 0 && isPipeTool(game.mode) && e.pointerType !== 'touch') {
     const t = tileAtScreen(e.clientX, e.clientY);
     game.pipeDown(t.x, t.y);
     pipeDrag = true;
@@ -257,7 +293,8 @@ canvas.addEventListener('pointerup', (e) => {
   if (drag && !drag.moved) {
     if (drag.button === 0) {
       const t = tileAtScreen(e.clientX, e.clientY);
-      if (e.pointerType === 'touch' && game.mode && !isPipeTool(game.mode)) proposeBuild(t.x, t.y);
+      if (e.pointerType === 'touch' && isPipeTool(game.mode)) tapPipe(t.x, t.y);
+      else if (e.pointerType === 'touch' && game.mode) proposeBuild(t.x, t.y);
       else {
         game.click(t.x, t.y);
         hud.update();
@@ -437,7 +474,7 @@ function frame(now: number): void {
 
   // Место стройки, выбранное касанием, держится до подтверждения или смены режима.
   if (pendingBuild) {
-    if (!game.mode || isPipeTool(game.mode)) clearPendingBuild();
+    if (!game.mode) clearPendingBuild();
     else game.hover = pendingBuild;
   }
   const building = game.mode && !isPipeTool(game.mode) ? game.mode : null;

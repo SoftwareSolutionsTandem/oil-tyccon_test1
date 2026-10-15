@@ -17,6 +17,9 @@ const MOBILE_TABS: Array<[MobileTab, string]> = [
   ['company', 'Компания'],
   ['stats', 'Статистика'],
 ];
+/** Скорости игры по кругу (кнопка скорости на узком экране и пункт меню). */
+const SPEEDS = [0, 1, 2, 4] as const;
+const speedLabel = (v: number) => (v === 0 ? '❚❚' : `${v}×`);
 /** Узкий экран: нижний лист вместо боковых колонок. Десктоп не меняется. */
 const MOBILE_QUERY = '(max-width: 600px)';
 
@@ -69,6 +72,12 @@ export class Hud {
   private selSheet!: HTMLElement;
   /** Подтверждение стройки касанием (узкий экран). */
   private confirmBar!: HTMLElement;
+  /** Полоса режима стройки или трубы на узком экране. */
+  private modeBar!: HTMLElement;
+  /** Режим на прошлом обновлении: лист сворачивается один раз — когда режим выбран, а не каждый кадр. */
+  private lastMode: string | null = null;
+  /** Отмена режима с полосы режима (main.ts сбрасывает ожидающую стройку или трубу). */
+  onModeCancel: () => void = () => {};
 
   constructor(
     private game: Game,
@@ -119,7 +128,18 @@ export class Hud {
     const no = el('button', '', '✕');
     no.dataset.role = 'confirm-no';
     this.confirmBar.append(yes, no);
-    this.root.append(this.sheet, this.selSheet, this.confirmBar);
+    // Полоса режима на узком экране: что делать пальцем сейчас и кнопка отмены (вместо подсказок для мыши).
+    this.modeBar = el('div', 'mode-bar panel', '<span class="text"></span>');
+    const cancel = el('button', '', 'Отмена');
+    cancel.dataset.role = 'mode-cancel';
+    cancel.onclick = () => {
+      this.game.mode = null;
+      this.game.pipeStart = null;
+      this.onModeCancel();
+      this.update();
+    };
+    this.modeBar.append(cancel);
+    this.root.append(this.sheet, this.selSheet, this.confirmBar, this.modeBar);
     const mq = window.matchMedia(MOBILE_QUERY);
     const apply = () => this.setMobile(mq.matches);
     mq.addEventListener('change', apply);
@@ -157,11 +177,12 @@ export class Hud {
   }
 
   /** Узкий экран: выбор места для стройки касанием ждёт подтверждения. null — убрать панель. */
-  showBuildConfirm(text: string | null, ok: boolean, onYes: () => void, onNo: () => void): void {
+  showBuildConfirm(text: string | null, ok: boolean, onYes: () => void, onNo: () => void, yesLabel = 'Построить ✓'): void {
     this.confirmBar.classList.toggle('open', text !== null);
     if (text === null) return;
     this.confirmBar.querySelector('.text')!.textContent = text;
     const yes = this.confirmBar.querySelector<HTMLButtonElement>('[data-role=confirm-yes]')!;
+    yes.textContent = yesLabel;
     yes.disabled = !ok;
     yes.onclick = onYes;
     this.confirmBar.querySelector<HTMLButtonElement>('[data-role=confirm-no]')!.onclick = onNo;
@@ -187,10 +208,15 @@ export class Hud {
       <div class="spacer"></div>
       <div class="stat" style="min-width:64px" title="Время суток. Сутки длятся 10 минут игры на скорости ×1"><span class="label">Время</span><span class="value" data-ref="clock"></span></div>
       <div class="speed"></div>
+      <button data-ref="speed-cycle" title="Скорость игры: пауза → 1× → 2× → 4×"></button>
       <button data-ref="menu" title="Меню">☰</button>`;
     bar.querySelectorAll<HTMLElement>('[data-ref]').forEach((e) => (this.refs[e.dataset.ref!] = e));
     this.refs.sell.onclick = () => this.game.sell();
     this.refs.menu.onclick = () => this.showMenu();
+    this.refs['speed-cycle'].onclick = () => {
+      this.game.speed = SPEEDS[(SPEEDS.indexOf(this.game.speed as (typeof SPEEDS)[number]) + 1) % SPEEDS.length];
+      this.update();
+    };
     const speed = bar.querySelector('.speed')!;
     for (const [v, label] of [[0, '❚❚'], [1, '1×'], [2, '2×'], [4, '4×']] as const) {
       const b = el('button', '', label);
@@ -208,6 +234,7 @@ export class Hud {
     for (const type of BUILDABLE) {
       const spec = core.BUILDINGS[type];
       const card = el('button', 'build-card');
+      card.dataset.type = type;
       card.innerHTML = `<div class="row"><span><span class="name">${spec.name}</span><span class="key">${spec.hotkey}</span></span><span class="cost"></span></div><div class="meta"></div>`;
       card.title = spec.description;
       card.onclick = () => this.game.setMode(type);
@@ -218,6 +245,7 @@ export class Hud {
     for (const tool of ['pipe', 'trunk', 'unpipe'] as PipeTool[]) {
       const spec = PIPE_TOOLS[tool];
       const card = el('button', 'build-card');
+      card.dataset.tool = tool;
       const meta =
         spec.kind === 0
           ? `Возврат ${Math.round(core.PIPE_REFUND * 100)}% стоимости`
@@ -235,6 +263,7 @@ export class Hud {
     build.append(el('h3', '', 'Трубопроводы'), pipes);
     const objective = el('div', 'panel objective', '<h3>Цель</h3><div class="body"></div>');
     this.refs.objective = objective.querySelector('.body')!;
+    this.refs.objectiveHead = objective.querySelector('h3')!;
     const tech = this.buildTech();
     this.panels.build = build;
     this.panels.objective = objective;
@@ -358,7 +387,11 @@ export class Hud {
 
     this.refs.profit.textContent = money(profit);
     this.refs.profit.className = `value ${profit < 0 ? 'neg' : profit > 0 ? 'pos' : ''}`;
-    this.refs.sell.textContent = `Продать ${num(s.oil)} барр. · ${money(core.manualSellValue(s))}`;
+    // На узком экране — коротко: сумма видна во всплывающем тексте после продажи.
+    this.refs.sell.textContent = this.mobile ? 'Продать' : `Продать ${num(s.oil)} барр. · ${money(core.manualSellValue(s))}`;
+    this.refs.sell.title = `Продать ${num(s.oil)} барр. перекупщику за ${money(core.manualSellValue(s))} (скидка 20%)`;
+    this.refs['speed-cycle'].textContent = speedLabel(this.game.speed);
+    this.refs.oil.textContent = this.mobile ? `${num(s.oil)} барр.` : `${num(s.oil)} / ${num(cap)}`;
     (this.refs.sell as HTMLButtonElement).disabled = s.oil < 1;
     for (const [v, b] of this.speedButtons) b.classList.toggle('active', this.game.speed === v);
     const hour = this.handlers.hour();
@@ -407,12 +440,16 @@ export class Hud {
 
   private updateBuildCards(): void {
     const s = this.s;
+    const goalIndex = (t: core.BuildableType) => core.OBJECTIVES.findIndex((o) => o.unlocks?.includes(t));
+    const nextLocked = [...this.buildCards.keys()].filter((t) => !s.unlocked.includes(t)).sort((a, b) => goalIndex(a) - goalIndex(b))[0];
     for (const [type, card] of this.buildCards) {
       const spec = core.BUILDINGS[type];
       const unlocked = s.unlocked.includes(type);
       const cost = core.buildCost(s, type);
       const lvl = spec.levels[0];
       card.classList.toggle('locked', !unlocked);
+      // Закрытые здания не загромождают панель: видно только то, что откроется следующим.
+      card.style.display = unlocked || type === nextLocked ? '' : 'none';
       card.classList.toggle('active', this.game.mode === type);
       card.querySelector('.cost')!.textContent = unlocked ? money(cost) : '🔒';
       let meta: string;
@@ -446,7 +483,8 @@ export class Hud {
       <div class="progress"><span>${fmt(Math.max(0, p.current))} / ${fmt(p.target)}</span><span>${Math.floor(k * 100)}%</span></div>
       <div class="bar"><div style="width:${k * 100}%"></div></div>
       ${o.reward ? `<div class="reward">Награда: ${money(o.reward)}${o.unlocks ? ' · открывает: ' + o.unlocks.map((t) => core.BUILDINGS[t].name).join(', ') : ''}</div>` : ''}
-      <div class="small" style="margin-top:6px">Цель ${s.objectiveIndex + 1} из ${core.OBJECTIVES.length}</div>`;
+`;
+    this.refs.objectiveHead.textContent = `Цель ${s.objectiveIndex + 1}/${core.OBJECTIVES.length}`;
   }
 
   private updateTech(): void {
@@ -466,6 +504,7 @@ export class Hud {
       const max = core.TECHS[id].levels.length;
       const next = core.techNextLevel(s, id);
       card.classList.toggle('locked', !open);
+      card.style.display = open ? '' : 'none';
       card.querySelector('.lvl')!.textContent = `${level}/${max}`;
       const btn = card.querySelector<HTMLButtonElement>('button.go')!;
       const effect = card.querySelector('.effect')!;
@@ -502,6 +541,7 @@ export class Hud {
     for (const role of ['dispatcher', 'mechanic'] as const) {
       const box = p.querySelector<HTMLElement>(`.staff[data-role=${role}]`)!;
       box.classList.toggle('locked', !staffOpen);
+      box.style.display = staffOpen ? '' : 'none';
       box.querySelector('.pay')!.textContent = `${money(core.MANAGERS[role].salary * 60)}/мин`;
       const btn = box.querySelector('button')!;
       btn.textContent = s.managers[role] ? 'Уволить' : 'Нанять';
@@ -515,11 +555,11 @@ export class Hud {
     const body = p.querySelector('.loan-body')!;
     if (!loansOpen) {
       body.textContent = `Откроется после цели «${goal('loans')}»`;
-      take.textContent = 'Взять кредит';
-      take.disabled = true;
+      take.style.display = 'none';
       repay.style.display = 'none';
       return;
     }
+    take.style.display = '';
     if (s.loan) {
       const debt = core.loanDebt(s);
       const left = s.loan.term - (s.time - s.loan.start);
@@ -677,8 +717,10 @@ export class Hud {
     this.selectionKey = key;
     this.selectionPanel.style.display = key ? '' : 'none';
     this.selSheet.classList.toggle('open', this.mobile && !!key);
-    // Стройка на узком экране: лист сворачивается, чтобы карта была видна.
-    if (this.mobile && this.game.mode && this.activeTab === 'build') this.setTab(null);
+    // Стройка на узком экране: лист сворачивается один раз, когда режим выбран, — чтобы карта была видна.
+    // Дальше вкладку можно снова открыть (например, чтобы выбрать трубу), пока режим ещё включён.
+    if (this.mobile && this.game.mode && this.game.mode !== this.lastMode && this.activeTab === 'build') this.setTab(null);
+    this.lastMode = this.game.mode;
   }
 
   /** Панель НПЗ: загрузка, причины простоя, продукты, сравнение «продать или переработать». */
@@ -1043,6 +1085,27 @@ export class Hud {
       else if (!core.isTileOwned(s, g.hover.x, g.hover.y)) text = 'Чужой участок — щёлкните, чтобы узнать цену и заказать разведку';
     }
     if (this.refs.hint.textContent !== text) this.refs.hint.textContent = text;
+    this.updateModeBar();
+  }
+
+  /** Полоса режима на узком экране: что сделать пальцем сейчас (подсказки для мыши там не показываются). */
+  private updateModeBar(): void {
+    const g = this.game;
+    const on = this.mobile && !!g.mode;
+    this.modeBar.classList.toggle('open', on);
+    if (!on) return;
+    let text: string;
+    if (isPipeTool(g.mode)) {
+      const name = PIPE_TOOLS[g.mode].name;
+      if (g.mode === 'unpipe') text = g.pipeStart ? `${name}: коснитесь конечной клетки участка` : `${name}: коснитесь начала участка трубы`;
+      else text = g.pipeStart ? `${name}: коснитесь конечной клетки трубы` : `${name}: коснитесь начала — у здания или трубы`;
+    } else {
+      const type = g.mode as core.BuildableType;
+      const where = type === 'pumpjack' ? 'тёмного пятна месторождения' : type === 'platform' ? 'морского месторождения' : 'свободной клетки своей земли';
+      text = `${core.BUILDINGS[type].name} · ${money(core.buildCost(this.s, type))} — коснитесь ${where}`;
+    }
+    const el = this.modeBar.querySelector('.text')!;
+    if (el.textContent !== text) el.textContent = text;
   }
 
   toast(text: string, kind: ToastKind = 'info'): void {
@@ -1054,9 +1117,9 @@ export class Hud {
     setTimeout(() => t.remove(), kind === 'good' ? 5000 : 3500);
   }
 
-  modal(title: string, html: string, buttons: Array<{ label: string; primary?: boolean; onClick?: () => void }>): void {
+  modal(title: string, html: string, buttons: Array<{ label: string; primary?: boolean; onClick?: () => void }>, kind = ''): void {
     const backdrop = el('div', 'modal-backdrop');
-    const box = el('div', 'modal panel', `<h2>${title}</h2>${html}<div class="buttons"></div>`);
+    const box = el('div', `modal panel ${kind}`, `<h2>${title}</h2>${html}<div class="buttons"></div>`);
     for (const b of buttons) {
       const btn = el('button', b.primary ? 'primary' : '', b.label);
       btn.onclick = () => {
@@ -1102,21 +1165,33 @@ export class Hud {
         { label: 'Как играть', onClick: () => this.showHelp() },
         {
           // На узком экране кнопок скорости в верхней строке нет — переключение здесь (пауза → 1× → 2× → 4×).
-          label: `Скорость: ${this.game.speed === 0 ? 'пауза' : this.game.speed + '×'} (сменить)`,
-          onClick: () => (this.game.speed = [1, 2, 4, 0][([0, 1, 2, 4].indexOf(this.game.speed) + 1) % 4]),
+          label: `Скорость: ${this.game.speed === 0 ? 'пауза' : this.game.speed + '×'}`,
+          onClick: () => {
+            this.game.speed = SPEEDS[(SPEEDS.indexOf(this.game.speed as (typeof SPEEDS)[number]) + 1) % SPEEDS.length];
+            this.showMenu();
+          },
         },
         {
           label: `Смена дня и ночи: ${this.handlers.dayNight() ? 'вкл' : 'выкл'}`,
-          onClick: () => this.handlers.toggleDayNight(),
+          onClick: () => {
+            this.handlers.toggleDayNight();
+            this.showMenu();
+          },
         },
         {
           label: `Звук: ${this.handlers.sound().on ? 'вкл' : 'выкл'}`,
-          onClick: () => this.handlers.setSoundOn(!this.handlers.sound().on),
+          onClick: () => {
+            this.handlers.setSoundOn(!this.handlers.sound().on);
+            this.showMenu();
+          },
         },
         {
           // Громкость шагами по 20% (кнопка удобнее ползунка на телефоне).
-          label: `Громкость: ${Math.round(this.handlers.sound().volume * 100)}% (сменить)`,
-          onClick: () => this.handlers.setVolume(((Math.round(this.handlers.sound().volume * 5) % 5) + 1) / 5),
+          label: `Громкость: ${Math.round(this.handlers.sound().volume * 100)}%`,
+          onClick: () => {
+            this.handlers.setVolume(((Math.round(this.handlers.sound().volume * 5) % 5) + 1) / 5);
+            this.showMenu();
+          },
         },
         {
           label: 'Новая игра',
@@ -1128,6 +1203,7 @@ export class Hud {
         },
         { label: 'Продолжить', primary: true },
       ],
+      'menu',
     );
   }
 }

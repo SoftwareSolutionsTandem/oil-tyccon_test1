@@ -88,6 +88,9 @@ export class Game {
       }
       this.renderer.floatText(x + 0.5, y + 0.5, `−${money(cost)}`, '#ff9d8a');
       this.sfx('build');
+      // Значок ⌁ над зданием без трубы игроку непонятен — сразу подсказываем, что делать.
+      const b = core.buildingAt(s, x, y);
+      if (b && type !== 'tank' && !core.isConnected(s, b)) this.onToast('Здание не подключено (значок ⌁): выберите его и нажмите «Подключить» или проложите трубу к конторе или резервуару', 'info');
       return;
     }
     if (!core.inBounds(s, x, y)) {
