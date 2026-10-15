@@ -151,6 +151,8 @@ export interface Totals {
   borrowed: number;
   repaid: number;
   interest: number;
+  /** Награды за просмотр рекламы (веха 0.5, этап 3) — отдельный член денежного инварианта. */
+  adRewards: number;
 }
 
 export interface GameState {
@@ -182,6 +184,8 @@ export interface GameState {
   research: ResearchState;
   managers: ManagersState;
   loan: LoanState | null;
+  /** Игровое время последней награды за рекламу, с (null — не было). */
+  adLastAt: number | null;
   /** Индекс текущей цели в списке OBJECTIVES. */
   objectiveIndex: number;
   totals: Totals;

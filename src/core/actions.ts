@@ -1,5 +1,7 @@
 import { BUILDINGS, LOANS, MANUAL_SELL_FACTOR, PARCELS_PER_SIDE, PIPE_REFUND, PLATFORM, REGIONS, SURVEY_EXACT, SURVEY_LEVELS, TECHS } from './config';
 import {
+  adCooldownLeft,
+  adReward,
   buildCost,
   demolishRefund,
   gradePrice,
@@ -264,6 +266,27 @@ export function sellManual(s: GameState): { ok: true; amount: number; revenue: n
   recordStat(s, 'sold', amount);
   recordStat(s, 'revenue', revenue);
   return { ok: true, amount, revenue };
+}
+
+/** Можно ли выдать награду за рекламу: пауза между показами прошла, награда больше нуля. */
+export function canClaimAdReward(s: GameState): ActionResult {
+  if (adCooldownLeft(s) > 0) return fail('Реклама будет доступна позже');
+  if (adReward(s) <= 0) return fail('Нет операционной прибыли — награда была бы нулевой');
+  return OK;
+}
+
+/**
+ * Награда за просмотр рекламы. Вызывается только после подтверждения платформой (onRewarded); повторный вызов
+ * в паузе между показами ничего не даёт — награда выдаётся один раз. Деньги — в totals.adRewards.
+ */
+export function claimAdReward(s: GameState): { ok: boolean; reason?: string; amount: number } {
+  const check = canClaimAdReward(s);
+  if (!check.ok) return { ok: false, reason: check.reason, amount: 0 };
+  const amount = adReward(s);
+  s.cash += amount;
+  s.totals.adRewards += amount;
+  s.adLastAt = s.time;
+  return { ok: true, amount };
 }
 
 export function canBuyParcel(s: GameState, px: number, py: number): ActionResult {

@@ -255,6 +255,12 @@ export const MANAGERS = {
  */
 export const LOANS = { limitMinutes: 10, ratePerMinute: 0.008, termMinutes: 30 };
 
+/**
+ * Реклама за награду (веха 0.5, этап 3): награда — minutes минут операционной прибыли (по последней минуте),
+ * следующая — не раньше чем через cooldownMinutes игрового времени. Числа — «Временно».
+ */
+export const AD_REWARD = { minutes: 5, cooldownMinutes: 10 };
+
 /** Допуск завершения исследования, с: накопленная ошибка суммы шагов не откладывает завершение на шаг. */
 export const RESEARCH_EPS = 1e-6;
 

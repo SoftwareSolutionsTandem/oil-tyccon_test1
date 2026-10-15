@@ -67,6 +67,11 @@ export function deserialize(json: string): GameState | null {
   // Участки новых регионов (веха 0.5) старые игры не видели — они не разведаны.
   if (s.version < 4) state.map = { ...state.map, survey: state.map.owned.map((_, i) => (parcelRegion(i % PARCELS_PER_SIDE, Math.floor(i / PARCELS_PER_SIDE)) === 0 ? SURVEY_EXACT : 0)) };
   else if (!Array.isArray(state.map.survey) || state.map.survey.length !== reference.map.survey.length) return null;
+  // Реклама (веха 0.5, этап 3): поля без повышения версии — отсутствующие получают значения по умолчанию.
+  if (typeof state.totals.adRewards !== 'number') state.totals = { ...state.totals, adRewards: 0 };
+  if (!Number.isFinite(state.totals.adRewards) || state.totals.adRewards < 0) return null;
+  if (state.adLastAt === undefined) state.adLastAt = null;
+  if (state.adLastAt !== null && (typeof state.adLastAt !== 'number' || !Number.isFinite(state.adLastAt))) return null;
   state.version = SAVE_VERSION;
   return state;
 }

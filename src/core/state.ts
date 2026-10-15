@@ -26,6 +26,7 @@ export function createNewGame(seed: number = (Math.random() * 2 ** 31) | 0): Gam
     research: { levels: {}, active: null },
     managers: { dispatcher: false, mechanic: false, reserve: 0 },
     loan: null,
+    adLastAt: null,
     objectiveIndex: 0,
     totals: {
       produced: 0,
@@ -44,6 +45,7 @@ export function createNewGame(seed: number = (Math.random() * 2 ** 31) | 0): Gam
       borrowed: 0,
       repaid: 0,
       interest: 0,
+      adRewards: 0,
     },
     stats: { buckets: [], current: emptyBucket(), currentTime: 0 },
     savedAt: Date.now(),

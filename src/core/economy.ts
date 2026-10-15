@@ -14,6 +14,8 @@ import {
   PLATFORM,
   REGIONS,
   START_PARCEL,
+  AD_REWARD,
+  RESEARCH_EPS,
   STATS_WINDOW,
   TECHS,
   LOANS,
@@ -376,6 +378,20 @@ export function advanceStats(s: GameState, dt: number): void {
 }
 
 /** Потоки за последнюю минуту (скользящее окно). */
+/** Награда за рекламу сейчас, $: AD_REWARD.minutes минут операционной прибыли последней минуты (не меньше 0). */
+export function adReward(s: GameState): number {
+  const m = lastMinute(s);
+  return Math.max(0, Math.round((m.revenue - m.expenses) * AD_REWARD.minutes));
+}
+
+/** Сколько секунд игрового времени до следующей награды за рекламу (0 — можно сейчас). */
+export function adCooldownLeft(s: GameState): number {
+  if (s.adLastAt === null || s.adLastAt === undefined) return 0;
+  // Допуск как у исследований: накопленная ошибка суммы шагов времени не откладывает показ.
+  const left = s.adLastAt + AD_REWARD.cooldownMinutes * 60 - s.time;
+  return left > RESEARCH_EPS ? left : 0;
+}
+
 export function lastMinute(s: GameState): StatBucket {
   const sum = emptyBucket();
   for (const b of [...s.stats.buckets, s.stats.current]) {
