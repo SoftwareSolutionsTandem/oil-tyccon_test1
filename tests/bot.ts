@@ -19,6 +19,7 @@ import {
   isProducer,
   drainagePool,
   parcelRegion,
+  regionOpen,
   REGIONS,
   parcelEstimate,
   parcelPrice,
@@ -247,11 +248,37 @@ function platformSpot(s: GameState): { x: number; y: number; pool: number } | nu
 /** Окупаемость следующей качалки, с, дольше которой бот с регионами покупает землю нового региона. */
 const LAND_SWITCH = 1800;
 
-/** Можно ли купить (при деньгах) участок открытого нового региона рядом со своей землёй. */
+/** Можно ли купить (при деньгах) участок открытого нового региона рядом со своей землёй — или «мост» к нему. */
 function regionParcelAvailable(s: GameState): boolean {
   for (let py = 0; py < PARCELS_PER_SIDE; py++)
-    for (let px = 0; px < PARCELS_PER_SIDE; px++) if (parcelRegion(px, py) !== 0 && canBuyParcel({ ...s, cash: Infinity }, px, py).ok) return true;
+    for (let px = 0; px < PARCELS_PER_SIDE; px++) {
+      if (!canBuyParcel({ ...s, cash: Infinity }, px, py).ok) continue;
+      if (parcelRegion(px, py) !== 0 || bridgeTo(s, px, py) > 0) return true;
+    }
   return false;
+}
+
+/** Условная оценка запасов неразведанного участка нового региона для «моста», барр. (Временно, только для бота). */
+const BRIDGE_GUESS = 40_000;
+
+/**
+ * «Мостовой» участок степи (решение 2б-3): соседний с ним участок открытого нового региона пока не купить (нет своей
+ * земли рядом). Возвращает оценку запасов лучшего такого соседа — её бот добавляет к ценности участка степи.
+ */
+function bridgeTo(s: GameState, px: number, py: number): number {
+  if (parcelRegion(px, py) !== 0) return 0;
+  let best = 0;
+  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const qx = px + dx;
+    const qy = py + dy;
+    if (qx < 0 || qy < 0 || qx >= PARCELS_PER_SIDE || qy >= PARCELS_PER_SIDE) continue;
+    const r = parcelRegion(qx, qy);
+    if (r === 0 || !regionOpen(s, r) || s.map.owned[qy * PARCELS_PER_SIDE + qx]) continue;
+    if (canBuyParcel({ ...s, cash: Infinity }, qx, qy).ok) return 0; // уже есть путь — мост не нужен
+    const e = parcelEstimate(s, qx, qy);
+    best = Math.max(best, e.reserves ? (e.reserves.low + e.reserves.high) / 2 : BRIDGE_GUESS);
+  }
+  return best;
 }
 
 function producerPayback(s: GameState, type: 'pumpjack' | 'platform', at: { x: number; y: number }): number {
@@ -568,7 +595,9 @@ function decide(s: GameState, opts: BotOptions = {}): void {
     let best: { px: number; py: number; perBarrel: number } | null = null;
     for (const c of cands) {
       // Пустой по оценке участок (нужен ради соседства) — в конце очереди, среди них — дешёвый.
-      const perBarrel = parcelPrice(s, c.px, c.py) / Math.max(1, value(c));
+      // Мост к региону: участок степи ценится и по запасам соседа из нового региона (только в прогонах с регионами).
+      const bridge = (opts.regions ?? true) ? bridgeTo(s, c.px, c.py) : 0;
+      const perBarrel = (parcelPrice(s, c.px, c.py) + (bridge > 0 ? REGIONS[1].parcelBase : 0)) / Math.max(1, value(c) + bridge);
       if (!best || perBarrel < best.perBarrel) best = { ...c, perBarrel };
     }
     if (!best) return;
