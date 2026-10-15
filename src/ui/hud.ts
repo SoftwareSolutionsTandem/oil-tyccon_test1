@@ -1069,6 +1069,11 @@ export class Hud {
     this.root.append(backdrop);
   }
 
+  /** Закрывает открытые окна (например, «Как играть» новой игры, когда пришло облачное сохранение). */
+  closeModals(): void {
+    for (const m of this.root.querySelectorAll('.modal-backdrop')) m.remove();
+  }
+
   showHelp(): void {
     this.modal(
       'Как играть',

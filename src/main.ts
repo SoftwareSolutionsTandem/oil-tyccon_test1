@@ -376,6 +376,7 @@ void detectPlatform().then(async (p) => {
     if (pick?.from === 'cloud') {
       const st = core.deserialize(pick.json);
       if (st) {
+        hud.closeModals();
         game.state = st;
         game.selection = null;
         renderer.adopt(st);
