@@ -1,4 +1,4 @@
-export type BuildingType = 'hq' | 'pumpjack' | 'tank' | 'terminal' | 'refinery';
+export type BuildingType = 'hq' | 'pumpjack' | 'tank' | 'terminal' | 'refinery' | 'platform';
 export type BuildableType = Exclude<BuildingType, 'hq'>;
 
 /**

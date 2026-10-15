@@ -109,6 +109,19 @@ export const BUILDINGS: Record<BuildableType, BuildingSpec> = {
     costGrowth: 1.4,
     hotkey: '3',
   },
+  platform: {
+    name: 'Морская платформа',
+    description: 'Добывает нефть на шельфе: ставится на клетку морского месторождения и дренирует всё месторождение в радиусе двух клеток. Дорогая, но одна заменяет несколько качалок.',
+    valueLabel: 'Добыча',
+    valueUnit: 'барр./с',
+    levels: [
+      { cost: 25000, upkeep: 6, value: 1.2 },
+      { cost: 30000, upkeep: 9, value: 2 },
+      { cost: 60000, upkeep: 14, value: 3.2 },
+    ],
+    costGrowth: 1.25,
+    hotkey: '7',
+  },
   refinery: {
     name: 'НПЗ',
     description: 'Нефтеперерабатывающий завод: забирает нефть из сети по трубам и сразу перерабатывает её в бензин, дизель и мазут, которые продаёт сам.',
@@ -291,6 +304,9 @@ export const PIPES: Record<1 | 2, PipeSpec> = {
 /** Доля стоимости трубы, возвращаемая при демонтаже. */
 export const PIPE_REFUND = 0.5;
 
+/** Морская платформа: радиус зоны дренирования (по сторонам, клетки) и наименьшее расстояние между платформами. */
+export const PLATFORM = { radius: 2, minDistance: 3 };
+
 export const PARCEL_BASE_PRICE = 3000;
 export const PARCEL_PRICE_GROWTH = 1.7;
 
@@ -305,6 +321,8 @@ export interface RegionSpec {
   freeParcels: number;
   /** Множитель содержания качалок региона. */
   pumpUpkeep: number;
+  /** Множитель цены трубы на клетках региона (по морю — дороже). */
+  pipeCost: number;
   /** Генерация: условная удалённость (как у участков региона 0), доля участков без месторождений, множитель запасов, доля тяжёлых месторождений. */
   remoteness: number;
   emptyChance: number;
@@ -316,9 +334,9 @@ export interface RegionSpec {
  * Регионы (веха 0.5, docs/M05_DESIGN.md §2.1). Регион 0 — прежняя карта с прежними числами. Числа новых регионов — «Временно».
  */
 export const REGIONS: readonly RegionSpec[] = [
-  { name: 'Степь', feature: null, parcelBase: PARCEL_BASE_PRICE, parcelGrowth: PARCEL_PRICE_GROWTH, freeParcels: 1, pumpUpkeep: 1, remoteness: 0, emptyChance: 0.35, reserveFactor: 1, heavyChance: 0 },
-  { name: 'Пустыня', feature: 'desert', parcelBase: 15000, parcelGrowth: 1.5, freeParcels: 0, pumpUpkeep: 1.3, remoteness: 3, emptyChance: 0.1, reserveFactor: 1.5, heavyChance: 0.85 },
-  { name: 'Шельф', feature: 'shelf', parcelBase: 40000, parcelGrowth: 1.5, freeParcels: 0, pumpUpkeep: 1, remoteness: 3, emptyChance: 0.35, reserveFactor: 1, heavyChance: 0 },
+  { name: 'Степь', feature: null, parcelBase: PARCEL_BASE_PRICE, parcelGrowth: PARCEL_PRICE_GROWTH, freeParcels: 1, pumpUpkeep: 1, pipeCost: 1, remoteness: 0, emptyChance: 0.35, reserveFactor: 1, heavyChance: 0 },
+  { name: 'Пустыня', feature: 'desert', parcelBase: 15000, parcelGrowth: 1.5, freeParcels: 0, pumpUpkeep: 1.3, pipeCost: 1, remoteness: 3, emptyChance: 0.1, reserveFactor: 1.5, heavyChance: 0.85 },
+  { name: 'Шельф', feature: 'shelf', parcelBase: 40000, parcelGrowth: 1.5, freeParcels: 0, pumpUpkeep: 1, pipeCost: 3, remoteness: 3, emptyChance: 0.35, reserveFactor: 1, heavyChance: 0 },
 ];
 
 /**

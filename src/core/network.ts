@@ -1,5 +1,5 @@
 import { PIPES, REFINERY } from './config';
-import { drainageTiles, gradePrice, levelSpec, rateFromPool, productPrice, pumpGrade, refineryMargin, refineryProductCap, refineryShip } from './economy';
+import { drainageTiles, gradePrice, isProducer, levelSpec, rateFromPool, productPrice, pumpGrade, refineryMargin, refineryProductCap, refineryShip } from './economy';
 import type { Building, GameState, Grade } from './types';
 
 /**
@@ -167,7 +167,7 @@ function buildNetwork(s: GameState, sig: number): Network {
   const attach = new Map<number, number>();
   const clientsOf = new Map<number, Building[]>();
   for (const b of [...s.buildings].sort((a, c) => a.id - c.id)) {
-    if (b.type !== 'pumpjack' && b.type !== 'terminal' && b.type !== 'refinery') continue;
+    if (!isProducer(b) && b.type !== 'terminal' && b.type !== 'refinery') continue;
     let best = -1;
     const seen = new Set<number>();
     for (let k = 0; k < 4; k++) {
@@ -189,7 +189,7 @@ function buildNetwork(s: GameState, sig: number): Network {
     }
     if (best < 0) continue;
     attach.set(b.id, best);
-    (b.type === 'pumpjack' ? components[best].pumps : b.type === 'terminal' ? components[best].terminals : components[best].refineries).push(b);
+    (isProducer(b) ? components[best].pumps : b.type === 'terminal' ? components[best].terminals : components[best].refineries).push(b);
   }
 
   const storages = s.buildings.filter(isStorage);
@@ -203,7 +203,7 @@ function buildNetwork(s: GameState, sig: number): Network {
   const routes = new Map<number, number[]>();
   for (const [id, list] of reach) routes.set(id, list[0].path);
   const drainage = new Map<number, number[]>();
-  for (const b of s.buildings) if (b.type === 'pumpjack') drainage.set(b.id, drainageTiles(s, b));
+  for (const b of s.buildings) if (isProducer(b)) drainage.set(b.id, drainageTiles(s, b));
   return { sig, compOfTile, components, attach, routes, reach, storages, drainage, ctx, detours: new Map() };
 }
 
@@ -615,7 +615,7 @@ export function stepLogistics(s: GameState, dt: number): StepResult {
   // Качалки — клиенты того же расчёта: забор и закачка делят трубы пропорционально.
   const pumps: Array<Client & { tiles: number[]; pool: number }> = [];
   for (const b of s.buildings) {
-    if (b.type !== 'pumpjack') continue;
+    if (!isProducer(b)) continue;
     const tiles = net.drainage.get(b.id)!;
     let pool = 0;
     let initial = 0;

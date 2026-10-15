@@ -141,6 +141,15 @@ export const OBJECTIVES: Objective[] = [
     features: ['desert'],
     progress: (s) => ({ current: surveyedParcelsInRegion(s, 1), target: 1 }),
   },
+  {
+    id: 'shelf',
+    title: 'Выход на шельф',
+    description: 'Закажите геологическую съёмку любого участка шельфа на юге. Откроются участки шельфа и морская платформа (7): лёгкая нефть, большая зона дренирования, трубы по морю втрое дороже.',
+    reward: 10_000,
+    unlocks: ['platform'],
+    features: ['shelf'],
+    progress: (s) => ({ current: surveyedParcelsInRegion(s, 2), target: 1 }),
+  },
 ];
 
 export function currentObjective(s: GameState): Objective | undefined {

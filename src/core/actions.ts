@@ -1,4 +1,4 @@
-import { BUILDINGS, LOANS, MANUAL_SELL_FACTOR, PARCELS_PER_SIDE, PIPE_REFUND, PIPES, REGIONS, SURVEY_EXACT, SURVEY_LEVELS, TECHS } from './config';
+import { BUILDINGS, LOANS, MANUAL_SELL_FACTOR, PARCELS_PER_SIDE, PIPE_REFUND, PLATFORM, REGIONS, SURVEY_EXACT, SURVEY_LEVELS, TECHS } from './config';
 import {
   buildCost,
   demolishRefund,
@@ -6,6 +6,7 @@ import {
   levelSpec,
   oilByGrade,
   parcelPrice,
+  pipeCostAt,
   productPrice,
   recordStat,
   techNextLevel,
@@ -39,7 +40,16 @@ export function canBuild(s: GameState, type: BuildableType, x: number, y: number
   if (buildingAt(s, x, y)) return fail('Клетка занята');
   if (s.map.pipes[tileIndex(s, x, y)] > 0) return fail('Клетка занята трубопроводом — сначала уберите трубу');
   const hasDeposit = s.map.initial[tileIndex(s, x, y)] > 0;
-  if (type === 'pumpjack') {
+  // Шельф (веха 0.5): на морских клетках — только морская платформа, и она — только на шельфе.
+  const sea = REGIONS[s.map.region[tileIndex(s, x, y)]]?.feature === 'shelf';
+  if (sea && type !== 'platform') return fail('На шельфе можно ставить только морскую платформу');
+  if (type === 'platform') {
+    if (!sea) return fail('Морская платформа ставится только на шельфе');
+    if (!hasDeposit) return fail('Платформу ставят на морское месторождение');
+    if (s.map.reserve[tileIndex(s, x, y)] <= 0) return fail('Месторождение исчерпано');
+    const d = PLATFORM.minDistance;
+    if (s.buildings.some((b) => b.type === 'platform' && Math.abs(b.x - x) + Math.abs(b.y - y) < d)) return fail(`Другая платформа ближе ${d} клеток`);
+  } else if (type === 'pumpjack') {
     if (!hasDeposit) return fail('Качалку можно поставить только на месторождение');
     if (s.map.reserve[tileIndex(s, x, y)] <= 0) return fail('Месторождение исчерпано');
     const why = rowConflict(s, x, y);
@@ -405,7 +415,8 @@ export function planPipes(s: GameState, tiles: PipeTile[], kind: 1 | 2): PipePla
     if (buildingAt(s, x, y)) continue; // здание само является узлом — труба подходит к нему вплотную
     const have = s.map.pipes[tileIndex(s, x, y)];
     if (have >= kind) continue;
-    cost += PIPES[kind].cost - (have > 0 ? PIPES[have as 1 | 2].cost : 0);
+    const i = tileIndex(s, x, y);
+    cost += pipeCostAt(s, i, kind) - (have > 0 ? pipeCostAt(s, i, have as 1 | 2) : 0);
     out.push([x, y]);
   }
   if (out.length === 0) return { ok: false, reason: 'Здесь уже есть такая труба', tiles: [], cost: 0 };
@@ -434,7 +445,7 @@ export function removePipes(s: GameState, tiles: PipeTile[]): { ok: boolean; rea
     const i = tileIndex(s, x, y);
     const have = s.map.pipes[i];
     if (!have) continue;
-    refund += Math.round(PIPES[have as 1 | 2].cost * PIPE_REFUND);
+    refund += Math.round(pipeCostAt(s, i, have as 1 | 2) * PIPE_REFUND);
     s.map.pipes[i] = 0;
     count++;
   }
@@ -521,7 +532,7 @@ export function planAutoConnect(s: GameState, id: number, kind: 1 | 2 = 1): Pipe
   const path: PipeTile[] = [];
   for (let t: number | undefined = found; t !== undefined; t = prev.get(t)) path.push([t % n, Math.floor(t / n)]);
   const missing = path.filter(([x, y]) => s.map.pipes[y * n + x] === 0);
-  const cost = missing.length * PIPES[kind].cost;
+  const cost = missing.reduce((sum, [x, y]) => sum + pipeCostAt(s, y * n + x, kind), 0);
   if (missing.length === 0) return { ok: false, reason: 'Уже подключено', tiles: [], cost: 0 };
   return { ok: s.cash >= cost, reason: s.cash >= cost ? undefined : 'Недостаточно денег', tiles: missing, cost };
 }

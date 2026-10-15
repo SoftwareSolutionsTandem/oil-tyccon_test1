@@ -1,6 +1,6 @@
 import { layPipes, planAutoConnect, planPipes, type PipeTile } from './actions';
 import { PIPES } from './config';
-import { levelSpec, pumpRate } from './economy';
+import { isProducer, levelSpec, pipeCostAt, pumpRate } from './economy';
 import { getNetwork, lastFlow, pipeCapacity, stepLogistics, syncOil, type FlowInfo } from './network';
 import type { ActionResult, Building, GameState } from './types';
 import { buildingAt, getBuilding, inBounds, isTileOwned } from './world';
@@ -46,7 +46,7 @@ const SIDES = [
 
 /** Поток здания, к которому стремится подключение: добыча качалки, отгрузка терминала или переработка НПЗ. */
 function wantOf(s: GameState, b: Building): number {
-  return b.type === 'pumpjack' ? pumpRate(s, b) : b.type === 'terminal' || b.type === 'refinery' ? levelSpec(b).value : 0;
+  return isProducer(b) ? pumpRate(s, b) : b.type === 'terminal' || b.type === 'refinery' ? levelSpec(b).value : 0;
 }
 
 /** Пробный поток на копии состояния (меряем трубы, а не заполненность склада). Само состояние не меняется. */
@@ -66,7 +66,7 @@ export function trialFlow(s: GameState, tiles: PipeTile[] = [], pipe: 1 | 2 = 1,
 
 function sumPumps(s: GameState, f: FlowInfo): number {
   let total = 0;
-  for (const b of s.buildings) if (b.type === 'pumpjack') total += f.clients.get(b.id)?.actual ?? 0;
+  for (const b of s.buildings) if (isProducer(b)) total += f.clients.get(b.id)?.actual ?? 0;
   return total;
 }
 
@@ -91,11 +91,11 @@ function planBranch(s: GameState, b: Building, base: FlowInfo, pipe: 1 | 2, targ
     const have = s.map.pipes[i];
     if (have > 0) {
       if (!congested(i)) return 0.01;
-      if (have === 1 && spare(i, 2) >= want) return (PIPES[2].cost - PIPES[1].cost) / unit;
+      if (have === 1 && spare(i, 2) >= want) return (pipeCostAt(s, i, 2) - pipeCostAt(s, i, 1)) / unit;
       return Infinity;
     }
-    // Рядом с перегруженной трубой можно, но дороже: такая клетка сольётся с ней в одну сеть.
-    return nearCongested(x, y) ? 4 : 1;
+    // Рядом с перегруженной трубой можно, но дороже: такая клетка сольётся с ней в одну сеть. По морю — дороже по цене.
+    return (nearCongested(x, y) ? 4 : 1) * (pipeCostAt(s, i, pipe) / unit);
   };
   const isTarget = (x: number, y: number) => Math.abs(x - target.x) + Math.abs(y - target.y) === 1;
 
@@ -172,7 +172,7 @@ const cache = new WeakMap<GameState, Map<string, ConnectOption[]>>();
  */
 export function connectOptions(s: GameState, id: number, pipe: 1 | 2 = 1): ConnectOption[] {
   const b = getBuilding(s, id);
-  if (!b || (b.type !== 'pumpjack' && b.type !== 'terminal' && b.type !== 'refinery')) return [];
+  if (!b || (!isProducer(b) && b.type !== 'terminal' && b.type !== 'refinery')) return [];
   const key = `${getNetwork(s).sig}:${id}:${pipe}`;
   let byState = cache.get(s);
   if (!byState) cache.set(s, (byState = new Map()));

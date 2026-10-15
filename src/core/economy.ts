@@ -10,6 +10,8 @@ import {
   REFINERY,
   MOTHBALL_UPKEEP,
   MARKET,
+  PIPES,
+  PLATFORM,
   REGIONS,
   START_PARCEL,
   STATS_WINDOW,
@@ -83,7 +85,7 @@ export function techEffect(s: GameState, id: TechId): { rate: number; upkeep: nu
   if (id === 'yield' || id === 'eor') {
     const m = depletionFloor(s);
     for (const b of s.buildings) {
-      if (b.type !== 'pumpjack' || !b.enabled) continue;
+      if (!isProducer(b) || !b.enabled) continue;
       const pool = drainagePool(s, b);
       if (pool.initial <= 0 || pool.reserve <= 0) continue;
       const x = pool.reserve / pool.initial;
@@ -132,16 +134,43 @@ const SIDES: ReadonlyArray<readonly [number, number]> = [
  * Зона дренирования скважины: своя клетка и соседние по сторонам клетки месторождения,
  * не занятые другими качалками. Скважина тянет нефть из всей зоны.
  */
+/** Добывающее здание: станок-качалка или морская платформа. */
+export function isProducer(b: { type: Building['type'] }): boolean {
+  return b.type === 'pumpjack' || b.type === 'platform';
+}
+
+/**
+ * Зона дренирования. Качалка — своя клетка и соседние по сторонам клетки месторождения; морская платформа —
+ * клетки месторождения в радиусе PLATFORM.radius по сторонам того же региона и сорта (зона не смешивает сорта).
+ * Клетки под другими добывающими зданиями не входят.
+ */
 export function drainageTiles(s: GameState, b: Building): number[] {
   const own = tileIndex(s, b.x, b.y);
   const out = [own];
+  if (b.type === 'platform') {
+    const r = PLATFORM.radius;
+    const g = s.map.grade[own];
+    const reg = s.map.region[own];
+    for (let dy = -r; dy <= r; dy++)
+      for (let dx = -r; dx <= r; dx++) {
+        if ((dx === 0 && dy === 0) || Math.abs(dx) + Math.abs(dy) > r) continue;
+        const x = b.x + dx;
+        const y = b.y + dy;
+        if (x < 0 || y < 0 || x >= s.map.size || y >= s.map.size) continue;
+        const i = tileIndex(s, x, y);
+        if (s.map.initial[i] <= 0 || s.map.grade[i] !== g || s.map.region[i] !== reg) continue;
+        if (s.buildings.some((o) => isProducer(o) && o.x === x && o.y === y)) continue;
+        out.push(i);
+      }
+    return out;
+  }
   for (const [dx, dy] of SIDES) {
     const x = b.x + dx;
     const y = b.y + dy;
     if (x < 0 || y < 0 || x >= s.map.size || y >= s.map.size) continue;
     const i = tileIndex(s, x, y);
     if (s.map.initial[i] <= 0) continue;
-    if (s.buildings.some((o) => o.type === 'pumpjack' && o.x === x && o.y === y)) continue;
+    if (s.buildings.some((o) => isProducer(o) && o.x === x && o.y === y)) continue;
     out.push(i);
   }
   return out;
@@ -280,7 +309,7 @@ export function timeToDeplete(s: GameState, b: Building): number {
 export function productionCapacity(s: GameState): number {
   let total = 0;
   for (const b of s.buildings) {
-    if (b.type === 'pumpjack' && b.enabled) total += pumpRate(s, b);
+    if (isProducer(b) && b.enabled) total += pumpRate(s, b);
   }
   return total;
 }
@@ -304,6 +333,11 @@ export function buildingUpkeep(b: Building, s?: GameState): number {
 
 export function totalUpkeep(s: GameState): number {
   return s.buildings.reduce((sum, b) => sum + buildingUpkeep(b, s), 0);
+}
+
+/** Цена клетки трубы вида kind на клетке i с поправкой региона (по морю дороже), $. */
+export function pipeCostAt(s: GameState, i: number, kind: 1 | 2): number {
+  return PIPES[kind].cost * (REGIONS[s.map.region?.[i] ?? 0]?.pipeCost ?? 1);
 }
 
 /** Множитель содержания здания от региона его клетки (веха 0.5): у качалок пустыни — REGIONS[1].pumpUpkeep. */
@@ -395,7 +429,7 @@ export function loanOverpay(loan: LoanState): number {
  */
 export function companyEarning(s: GameState): number {
   let value = 0;
-  for (const b of s.buildings) if (b.type === 'pumpjack' && b.enabled) value += pumpRate(s, b) * referencePrice(pumpGrade(s, b));
+  for (const b of s.buildings) if (isProducer(b) && b.enabled) value += pumpRate(s, b) * referencePrice(pumpGrade(s, b));
   return 60 * (value - totalUpkeep(s));
 }
 
