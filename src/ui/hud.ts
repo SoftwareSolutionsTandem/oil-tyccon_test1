@@ -4,11 +4,12 @@ import { isPipeTool, PIPE_TOOLS, type Game, type PipeTool, type ToastKind } from
 import { formatClock } from '../render/daylight';
 import { bbl, duration, money, num, price, rate } from './format';
 import { StatsPanel } from './stats';
+import { AchievementsPanel } from './achievements';
 
 const BUILDABLE: BuildableType[] = ['pumpjack', 'tank', 'terminal', 'refinery', 'platform'];
 
 /** Вкладки нижнего листа на узком экране. */
-type MobileTab = 'build' | 'objective' | 'finance' | 'tech' | 'company' | 'stats';
+type MobileTab = 'build' | 'objective' | 'finance' | 'tech' | 'company' | 'stats' | 'achievements';
 const MOBILE_TABS: Array<[MobileTab, string]> = [
   ['build', 'Стройка'],
   ['objective', 'Цель'],
@@ -16,6 +17,7 @@ const MOBILE_TABS: Array<[MobileTab, string]> = [
   ['tech', 'Технологии'],
   ['company', 'Компания'],
   ['stats', 'Статистика'],
+  ['achievements', 'Достижения'],
 ];
 /** Скорости игры по кругу (кнопка скорости на узком экране и пункт меню). */
 const SPEEDS = [0, 1, 2, 4] as const;
@@ -160,7 +162,7 @@ export class Hud {
       this.selSheet.append(this.panels.selection);
     } else {
       left.append(this.panels.build, this.panels.objective, this.panels.tech);
-      right.append(this.panels.selection, this.panels.finance, this.panels.company, this.panels.stats);
+      right.append(this.panels.selection, this.panels.finance, this.panels.company, this.panels.stats, this.panels.achievements);
     }
     this.setTab(this.activeTab);
   }
@@ -174,6 +176,7 @@ export class Hud {
     this.sheet.classList.toggle('open', tab !== null);
     // В листе статистика всегда раскрыта (заголовок-переключатель — для колонки на десктопе).
     if (tab === 'stats') this.stats.setOpen(true);
+    if (tab === 'achievements') this.achievements.setOpen(true);
   }
 
   /** Узкий экран: выбор места для стройки касанием ждёт подтверждения. null — убрать панель. */
@@ -296,6 +299,7 @@ export class Hud {
    */
   private adButton: HTMLButtonElement | null = null;
   private stats!: StatsPanel;
+  private achievements!: AchievementsPanel;
 
   enableAds(watch: () => void): void {
     if (this.adButton) return;
@@ -329,7 +333,9 @@ export class Hud {
     this.panels.finance = finance;
     this.panels.company = company;
     this.panels.stats = this.stats.el;
-    right.append(selection, finance, company, this.stats.el);
+    this.achievements = new AchievementsPanel(false);
+    this.panels.achievements = this.achievements.el;
+    right.append(selection, finance, company, this.stats.el, this.achievements.el);
     return right;
   }
 
@@ -359,6 +365,7 @@ export class Hud {
     const s = this.s;
     this.updateAd();
     this.stats.update(s);
+    this.achievements.update(s);
     const cap = core.storageCapacity(s);
     const minute = core.lastMinute(s);
     const profit = minute.revenue - minute.expenses;
@@ -469,23 +476,32 @@ export class Hud {
   private updateObjective(): void {
     const s = this.s;
     const o = core.currentObjective(s);
-    if (!o) {
-      this.refs.objective.innerHTML = '<div class="title">Все цели выполнены!</div><div class="desc">Вы построили нефтяную компанию. Продолжайте развитие — новые механики уже в планах.</div>';
-      return;
-    }
     const p = o.progress(s);
     const k = Math.max(0, Math.min(1, p.current / p.target));
-    const isMoney = /revenue|cash|profit/.test(o.id);
+    const isMoney = o.money || /revenue|cash|profit/.test(o.id);
     const fmt = (v: number) => (isMoney ? money(v) : num(v));
-    this.refs.objective.innerHTML = `
-      <div class="title">${o.title}</div>
+    // Цель-список: пункты с галочками; прогресс — число выполненных пунктов.
+    const items = o.items
+      ? `<ul class="checklist">${o.items(s)
+          .map((i) => `<li class="${i.current >= i.target ? 'done' : ''}">${i.current >= i.target ? '✓' : '○'} ${i.label}${i.target > 1 ? ` <span class="small">${(i.money ? money : num)(Math.max(0, Math.min(i.current, i.target)))} / ${(i.money ? money : num)(i.target)}</span>` : ''}</li>`)
+          .join('')}</ul>`
+      : `<div class="progress"><span>${fmt(Math.max(0, p.current))} / ${fmt(p.target)}</span><span>${Math.floor(k * 100)}%</span></div>`;
+    const html = `
+      <div class="title">${o.stage ? "Рост оборота" : o.title}</div>
       <div class="desc">${o.description}</div>
-      <div class="progress"><span>${fmt(Math.max(0, p.current))} / ${fmt(p.target)}</span><span>${Math.floor(k * 100)}%</span></div>
+      ${o.stage === 1 ? '<div class="desc small">Цепочка целей пройдена. Дальше — ступени без конца: порог выручки растёт с каждой.</div>' : ''}
+      ${items}
       <div class="bar"><div style="width:${k * 100}%"></div></div>
       ${o.reward ? `<div class="reward">Награда: ${money(o.reward)}${o.unlocks ? ' · открывает: ' + o.unlocks.map((t) => core.BUILDINGS[t].name).join(', ') : ''}</div>` : ''}
 `;
-    this.refs.objectiveHead.textContent = `Цель ${s.objectiveIndex + 1}/${core.OBJECTIVES.length}`;
+    // Без пересборки DOM каждый кадр, если ничего не изменилось.
+    if (html !== this.objectiveHtml) {
+      this.objectiveHtml = html;
+      this.refs.objective.innerHTML = html;
+    }
+    this.refs.objectiveHead.textContent = o.stage ? `Ступень ${o.stage}` : `Цель ${s.objectiveIndex + 1}/${core.OBJECTIVES.length}`;
   }
+  private objectiveHtml = '';
 
   private updateTech(): void {
     const s = this.s;

@@ -298,6 +298,18 @@ export class Game {
     }
     for (const o of ev.completed) this.announce(o);
     for (const r of ev.researched) this.announceResearch(r);
+    this.announceAchievements(core.checkAchievements(this.state));
+  }
+
+  /**
+   * Достижения проверяются после шага игры (и после офлайна — на первом шаге). Несколько сразу (старое сохранение
+   * или долгий офлайн) — одним уведомлением, без потока всплывающих окон.
+   */
+  announceAchievements(list: core.Achievement[]): void {
+    if (list.length === 0) return;
+    this.sfx('goal');
+    if (list.length > 2) return this.onToast(`Получено достижений: ${list.length} — смотрите панель «Достижения»`, 'good');
+    for (const a of list) this.onToast(`Достижение: ${a.icon} «${a.title}» — ${a.description}`, 'good');
   }
 
   announceResearch(r: { id: core.TechId; level: number }): void {

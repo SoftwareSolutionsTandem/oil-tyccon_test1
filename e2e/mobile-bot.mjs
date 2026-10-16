@@ -178,7 +178,7 @@ try {
   check('продажа нефти касанием', (await state()).cash > cash0);
 
   // 8. Все вкладки: открываются, содержимое в экране, карта ≥ 60%.
-  for (const tab of ['build', 'objective', 'finance', 'tech', 'company', 'stats']) {
+  for (const tab of ['build', 'objective', 'finance', 'tech', 'company', 'stats', 'achievements']) {
     await tapEl(`.sheet .tabs button[data-tab=${tab}]`);
     const p = await layoutProblems('.sheet');
     const shown = await page.evaluate((tab) => !!document.querySelector(`.sheet-body [data-tab=${tab}]:not(.tab-hidden)`), tab);
