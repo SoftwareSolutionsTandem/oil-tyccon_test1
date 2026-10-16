@@ -53,6 +53,8 @@ import {
   pumpGrade,
   TECH_IDS,
   TECHS,
+  loanDebt,
+  repayLoan,
   type BuildableType,
   type TechId,
   type GameState,
@@ -164,13 +166,15 @@ export function manageRefinery(s: GameState): void {
   const refineries = s.buildings.filter((b) => b.type === 'refinery');
   const present = presentGrades(s) || 1;
   const marginOk = ([0, 1] as const).some((g) => ((present >> g) & 1) === 1 && refineryMargin(s, g, false) > 0);
-  if (refineries.length === 0) {
+  // Цель M06 «Второй НПЗ»: второй завод — как первый, но без требования запаса нефти и с пробной загрузкой от 25%.
+  const pair = OBJECTIVES[s.objectiveIndex]?.id === 'refinery_pair';
+  if (refineries.length === 0 || (pair && refineries.length === 1 && refineries[0].level === 3)) {
     const cost = buildCost(s, 'refinery');
     if (s.cash < cost * 1.5 || !marginOk) return;
     const cap1 = BUILDINGS.refinery.levels[0].value;
     // Нефти в целом должно хватать: НПЗ делит её с терминалами пропорционально запросам, поэтому «остаток после
     // терминалов» не нужен — его фактическую долю проверяет пробный расчёт ниже (не меньше 75% мощности).
-    if (lastMinute(s).produced / 60 < cap1 * 1.5) return;
+    if (!pair && lastMinute(s).produced / 60 < cap1 * 1.5) return;
     // Клетки рядом с хранилищами: пробный расчёт потока на копии состояния — берём лучшую.
     let best: { x: number; y: number; flow: number } | null = null;
     for (const st of s.buildings) {
@@ -193,7 +197,7 @@ export function manageRefinery(s: GameState): void {
         if (!best || flow > best.flow) best = { x, y, flow };
       }
     }
-    if (!best || best.flow < cap1 * 0.75) return;
+    if (!best || best.flow < cap1 * (pair ? 0.25 : 0.75)) return;
     build(s, 'refinery', best.x, best.y);
     return;
   }
@@ -213,7 +217,7 @@ export function manageRefinery(s: GameState): void {
     const busy = lastMinute(s).refined / 60 >= cap * 0.9 ? (refineryBusy.get(s) ?? 0) + 1 : 0;
     refineryBusy.set(s, busy);
     const c = upgradeCost(r);
-    if (c !== null && busy >= 2 && marginOk && s.cash >= c * 1.5) {
+    if (c !== null && (busy >= 2 || pair) && marginOk && s.cash >= c * 1.5) {
       upgrade(s, r.id);
       refineryBusy.set(s, 0);
     }
@@ -502,7 +506,31 @@ function manageCompany(s: GameState, opts: BotOptions): void {
  * месторождениях, улучшения и логистика идут как обычно.
  */
 function capitalGoal(s: GameState, opts: BotOptions): boolean {
-  return (opts.regions ?? true) && OBJECTIVES[s.objectiveIndex]?.id === 'cash_500k';
+  return (opts.regions ?? true) && CAPITAL_GOALS.has(goalId(s));
+}
+
+/** Цели с капиталом «касса − долг» (cash_500k и цели M06 capital_1m, empire): бот копит, как описано выше. */
+const CAPITAL_GOALS = new Set(['cash_500k', 'capital_1m', 'empire']);
+/** id текущей цели цепочки ('' — цепочка пройдена, идут ступени). */
+const goalId = (s: GameState) => OBJECTIVES[s.objectiveIndex]?.id ?? '';
+
+/**
+ * Цели M06, требующие решения (как сделал бы игрок, читая цель): «Наукоёмкая компания» — исследует самый дешёвый
+ * доступный уровень, когда денег хватает на него и минуту содержания (без сравнения окупаемости); «Компания на
+ * автопилоте» — гасит кредит досрочно, когда касса покрывает долг с запасом 20%.
+ */
+function pursueGoal(s: GameState): void {
+  const id = goalId(s);
+  if ((id === 'science' || id === 'science_2') && s.features.includes('research') && !s.research.active) {
+    let pick: { id: TechId; cost: number } | null = null;
+    for (const t of TECH_IDS) {
+      const next = techNextLevel(s, t);
+      if (id === 'science_2' && techLevel(s, t) >= 2) continue;
+      if (next && (!pick || next.cost < pick.cost)) pick = { id: t, cost: next.cost };
+    }
+    if (pick && s.cash >= pick.cost + totalUpkeep(s) * 60) startResearch(s, pick.id);
+  }
+  if (id === 'autopilot' && s.loan && s.cash > loanDebt(s) * 1.2) repayLoan(s);
 }
 
 function decide(s: GameState, opts: BotOptions = {}): void {
@@ -541,6 +569,7 @@ function decide(s: GameState, opts: BotOptions = {}): void {
   if (Math.floor(s.time) % 10 === 0) manageRefinery(s);
   if (research && !capitalGoal(s, opts) && Math.floor(s.time) % 10 === 0) manageResearch(s, opts);
   if (Math.floor(s.time) % 10 === 0) manageCompany(s, opts);
+  if (Math.floor(s.time) % 10 === 0) pursueGoal(s);
   // Цели «Выход в пустыню» и «Выход на шельф»: съёмка участка региона, ближайшего к своей земле.
   const goalRegion = { desert: 1, shelf: 2 }[OBJECTIVES[s.objectiveIndex]?.id ?? ''];
   if ((opts.regions ?? true) && goalRegion !== undefined) {
@@ -556,7 +585,8 @@ function decide(s: GameState, opts: BotOptions = {}): void {
     if (pick && s.cash >= surveyCost(s, 1, pick.px, pick.py)) survey(s, pick.px, pick.py, 1);
   }
   // Копим на технологию — новые качалки, разведку и землю откладываем (улучшения и логистика идут дальше).
-  const saving = research && !!researchGoal.get(s);
+  // Цели капитала M06 (capital_1m, empire) — так же: новых зданий и земли нет, пока капитал не набран.
+  const saving = (research && !!researchGoal.get(s)) || (CAPITAL_GOALS.has(goalId(s)) && goalId(s) !== 'cash_500k');
 
   let deposit = saving ? undefined : freeTiles(s, true)[0];
   const spot = saving ? null : platformSpot(s);

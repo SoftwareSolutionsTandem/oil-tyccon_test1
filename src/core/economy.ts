@@ -19,6 +19,7 @@ import {
   STATS_WINDOW,
   TECHS,
   LOANS,
+  STAGES,
 } from './config';
 import type { BuildableType, Building, GameState, Grade, LoanState, StatBucket, TechId } from './types';
 import { ownedParcelsInRegion, parcelRegion, tileIndex } from './world';
@@ -457,4 +458,22 @@ export function loanLimit(s: GameState): number {
 /** Капитал компании: касса минус долг (цель «Нефтяная компания», решение В3). */
 export function capital(s: GameState): number {
   return s.cash - loanDebt(s);
+}
+
+// ——— Ступени после цепочки целей (M06-GOALS) ———
+
+/** Округление вниз до двух значащих цифр: пороги и награды ступеней читаются как «$18 млн», а не «$18 359 375». */
+function twoDigits(v: number): number {
+  const p = Math.pow(10, Math.max(0, Math.floor(Math.log10(Math.max(1, v))) - 1));
+  return Math.floor(v / p) * p;
+}
+
+/** Порог ступени N (N ≥ 1): выручка за всё время, $. Чистая функция от N — без ГСЧ и состояния. */
+export function stageTarget(n: number): number {
+  return twoDigits(STAGES.revenueBase * Math.pow(STAGES.growth, n - 1));
+}
+
+/** Награда за ступень N, $. */
+export function stageReward(n: number): number {
+  return twoDigits(STAGES.rewardBase * Math.pow(STAGES.rewardGrowth, n - 1));
 }

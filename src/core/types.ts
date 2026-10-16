@@ -201,6 +201,10 @@ export interface GameState {
   adLastAt: number | null;
   /** Индекс текущей цели в списке OBJECTIVES. */
   objectiveIndex: number;
+  /** Пройдено ступеней после цепочки целей (M06): текущая — stage + 1. Хранится только номер — условие считается от него. */
+  stage: number;
+  /** Полученные достижения (id из ACHIEVEMENTS) — без наград деньгами, ничего не открывают. */
+  achievements: string[];
   totals: Totals;
   stats: {
     /** Завершённые секунды, не более STATS_WINDOW штук. */

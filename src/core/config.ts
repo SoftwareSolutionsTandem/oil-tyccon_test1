@@ -359,3 +359,9 @@ export const SURVEY_LEVELS = [
 ] as const;
 /** Уровень «известно точно». */
 export const SURVEY_EXACT = 3;
+
+/**
+ * Бесконечные ступени после цепочки целей (веха 0.6, M06-GOALS): ступень N — выручка за всё время не меньше
+ * revenueBase · growth^(N−1), награда rewardBase · rewardGrowth^(N−1). Временно — до замеров на игроках.
+ */
+export const STAGES = { revenueBase: 17_000_000, growth: 1.2, rewardBase: 800_000, rewardGrowth: 1.25 };

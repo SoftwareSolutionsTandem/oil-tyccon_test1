@@ -30,6 +30,8 @@ export function createNewGame(seed: number = (Math.random() * 2 ** 31) | 0): Gam
     adLastAt: null,
     history: emptyHistory(),
     objectiveIndex: 0,
+    stage: 0,
+    achievements: [],
     totals: {
       produced: 0,
       sold: 0,

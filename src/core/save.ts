@@ -5,6 +5,7 @@ import { BASE_MAP_SIZE, MAP_OFFSET, PARCEL_SIZE, PARCELS_PER_SIDE, SURVEY_EXACT,
 import { syncOil } from './network';
 import { isParcelOwned, parcelRegion } from './world';
 import { emptyHistory, validHistory } from './history';
+import { ACHIEVEMENTS, OBJECTIVES } from './objectives';
 import { createNewGame, SAVE_VERSION } from './state';
 import type { Feature, GameState } from './types';
 
@@ -77,6 +78,15 @@ export function deserialize(json: string): GameState | null {
   // Ссылка из новой игры (reference) не годится: её итоги на начало минуты нулевые.
   if ((s as { history?: unknown }).history === undefined) state.history = emptyHistory(state);
   if (!validHistory(state)) return null;
+  // Ступени и достижения (M06): поля без повышения версии. Нет — 0 и пустой список (игрок, прошедший цепочку,
+  // получает новые цели по номеру, ступени — с первой). Достижения — только известные id, без повторов.
+  const raw = s as { stage?: unknown; achievements?: unknown };
+  if (raw.stage === undefined) state.stage = 0;
+  else if (!Number.isInteger(raw.stage) || (raw.stage as number) < 0) return null;
+  if (raw.achievements === undefined) state.achievements = [];
+  else if (!Array.isArray(raw.achievements)) return null;
+  else state.achievements = [...new Set(raw.achievements)].filter((id): id is string => ACHIEVEMENTS.some((a) => a.id === id));
+  if (!Number.isInteger(state.objectiveIndex) || state.objectiveIndex < 0 || state.objectiveIndex > OBJECTIVES.length) return null;
   state.version = SAVE_VERSION;
   return state;
 }
