@@ -10,11 +10,12 @@ import { runBot } from './bot';
 const LOG = !!(globalThis as { process?: { env: Record<string, string | undefined> } }).process?.env.BALANCE_LOG;
 const SEEDS = [1, 2, 3, 4, 5];
 const MINUTES = 240;
+const CHUNK = 10;
 /** Первая цель продолжения (после «Выхода на шельф»). */
 const FIRST_NEW = OBJECTIVES.findIndex((o) => o.id === 'shelf') + 1;
 
 describe.skipIf(!LOG)('отчёт: цели продолжения и ступени (M06)', () => {
-  it('бот проходит цепочку по порядку; цель есть в каждую минуту', () => {
+  it('бот проходит цепочку по порядку; цель есть в каждую минуту', async () => {
     const table = new Map<string, string[]>();
     const lines: string[] = [];
     for (const seed of SEEDS) {
@@ -22,23 +23,24 @@ describe.skipIf(!LOG)('отчёт: цели продолжения и ступе
       const at: Record<string, string> = {};
       let lastMinute = -1;
       let withoutGoal = 0;
-      runBot(
-        s,
-        MINUTES,
-        (ev, st) => {
-          for (const o of ev.completed) {
-            const p5 = averageProfit(st, 5);
-            at[o.id] = `${(st.time / 60).toFixed(0)} (${p5 > 0 ? (o.reward / p5).toFixed(1) : '—'})`;
-          }
-          const m = Math.floor(st.time / 60);
-          if (m !== lastMinute) {
-            lastMinute = m;
-            if (!currentObjective(st)) withoutGoal++;
-            checkAchievements(st); // как игра после шага (раз в минуту достаточно для отчёта)
-          }
-        },
-        { regions: true },
-      );
+      const onTick: Parameters<typeof runBot>[2] = (ev, st) => {
+        for (const o of ev.completed) {
+          const p5 = averageProfit(st, 5);
+          at[o.id] = `${(st.time / 60).toFixed(0)} (${p5 > 0 ? (o.reward / p5).toFixed(1) : '—'})`;
+        }
+        const m = Math.floor(st.time / 60);
+        if (m !== lastMinute) {
+          lastMinute = m;
+          if (!currentObjective(st)) withoutGoal++;
+          checkAchievements(st); // как игра после шага (раз в минуту достаточно для отчёта)
+        }
+      };
+      // Кусками по 10 минут с отдачей управления: долгий синхронный прогон блокирует воркер vitest (таймаут RPC).
+      // 10 мин = 6000 шагов — кратно периоду решений бота (10 шагов), поэтому прогон тот же, что одним вызовом.
+      for (let m = 0; m < MINUTES; m += CHUNK) {
+        runBot(s, CHUNK, onTick, { regions: true });
+        await new Promise((r) => setTimeout(r, 0));
+      }
       expect(withoutGoal).toBe(0);
       const ids = [...OBJECTIVES.slice(FIRST_NEW - 2).map((o) => o.id), ...Array.from({ length: 4 }, (_, i) => `stage_${i + 1}`)];
       for (const id of ids) {
